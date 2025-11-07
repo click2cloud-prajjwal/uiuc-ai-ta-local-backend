@@ -15,29 +15,35 @@ from typing import Any, Callable, Dict, List, Optional, Union, cast
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from dotenv import load_dotenv
-
 from azure.storage.blob import BlobServiceClient
 import openai
 import sentry_sdk
 # from posthog import Posthog
 from qdrant_client import QdrantClient, models
 from qdrant_client.models import PointStruct
-from langchain.document_loaders import (
+
+# Updated LangChain imports
+from langchain_community.document_loaders import (
       Docx2txtLoader,
       GitLoader,
       PythonLoader,
       TextLoader,
-)
-from langchain_community.document_loaders import (
       UnstructuredExcelLoader,
       UnstructuredPowerPointLoader,
+      CSVLoader,
 )
-from langchain.document_loaders.csv_loader import CSVLoader
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import Qdrant
-from langchain_openai import AzureOpenAIEmbeddings
+
+# Updated embeddings import - use AzureOpenAIEmbeddings from langchain_openai
+from langchain_openai import AzureOpenAIEmbeddings, OpenAIEmbeddings
+
+# Updated schema import
+from langchain_core.documents import Document
+
+# Updated text splitter import
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# Updated vectorstore import
+from langchain_qdrant import Qdrant
 
 import fitz
 import pdfplumber
@@ -55,7 +61,7 @@ except ModuleNotFoundError:
     from rmsql import SQLAlchemyIngestDB
     from embeddings import OpenAIAPIProcessor
 
-load_dotenv()
+load_dotenv(override=False)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class Ingest:
@@ -70,7 +76,7 @@ class Ingest:
         self.embedding_model = os.getenv('EMBEDDING_MODEL')
         
         # Qdrant credentials
-        self.qdrant_url = os.getenv('QDRANT_URL')
+        self.qdrant_url = os.getenv('QDRANT_URL','http://qdrant:6333')
         self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
         self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME', 'uiuc-chatbot')
         
@@ -81,25 +87,24 @@ class Ingest:
         self.s3_bucket_name = os.getenv('S3_BUCKET_NAME')
         
                 # === Cross-platform Tesseract setup ===
-        # === Cross-platform Tesseract setup ===
         try:
             if os.name == "nt":  # Windows
                 # Typical Windows installation path
                 tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
                 if os.path.exists(tesseract_path):
                     pytesseract.pytesseract.tesseract_cmd = tesseract_path
-                    logging.info(f"✅ Windows: Tesseract found at {tesseract_path}")
+                    logging.info(f"âœ… Windows: Tesseract found at {tesseract_path}")
                 else:
-                    logging.warning("⚠️ Windows: Tesseract not found at default path. OCR features may not work.")
+                    logging.warning("âš ï¸ Windows: Tesseract not found at default path. OCR features may not work.")
             else:
                 # Linux / macOS / Docker (Debian slim)
                 result = shutil.which("tesseract")
 
                 if result:
                     pytesseract.pytesseract.tesseract_cmd = result
-                    logging.info(f"✅ Linux: Tesseract found at {result}")
+                    logging.info(f"âœ… Linux: Tesseract found at {result}")
                 else:
-                    logging.warning("⚠️ Linux: Tesseract not found in PATH. Attempting to install...")
+                    logging.warning("âš ï¸ Linux: Tesseract not found in PATH. Attempting to install...")
 
                     # Attempt to install tesseract automatically
                     try:
@@ -110,14 +115,14 @@ class Ingest:
                         result = shutil.which("tesseract")
                         if result:
                             pytesseract.pytesseract.tesseract_cmd = result
-                            logging.info(f"✅ Successfully installed Tesseract at {result}")
+                            logging.info(f"âœ… Successfully installed Tesseract at {result}")
                         else:
-                            logging.error("❌ Tesseract installation completed but binary not found in PATH.")
+                            logging.error("âŒ Tesseract installation completed but binary not found in PATH.")
                     except Exception as install_err:
-                        logging.error(f"❌ Failed to install Tesseract automatically: {install_err}")
+                        logging.error(f"âŒ Failed to install Tesseract automatically: {install_err}")
 
         except Exception as e:
-            logging.error(f"❌ Error while configuring Tesseract OCR: {e}")
+            logging.error(f"âŒ Error while configuring Tesseract OCR: {e}")
 
 
         # Runtime objects
@@ -143,26 +148,25 @@ class Ingest:
         # Detect if using local Qdrant
         is_local_qdrant = "localhost" in self.qdrant_url or "127.0.0.1" in self.qdrant_url
         
-        # Initialize Qdrant client and create collection if necessary
+        # Initialize Qdrant client
         if is_local_qdrant:
             # Local Qdrant (no API key needed)
-            logging.info("🧠 Using LOCAL Qdrant instance")
+            logging.info("?? Using LOCAL Qdrant instance")
             self.qdrant_client = QdrantClient(
                 url=self.qdrant_url,
                 api_key=None,
                 timeout=20
             )
-        elif self.qdrant_api_key and self.qdrant_url:
-            # Cloud Qdrant (needs API key)
-            logging.info("☁️ Using CLOUD Qdrant instance")
+        elif self.qdrant_url:  # ? REMOVED api_key requirement
+            # Cloud/Docker Qdrant (API key optional)
+            logging.info("?? Using Qdrant instance at: " + self.qdrant_url)
             self.qdrant_client = QdrantClient(
                 url=self.qdrant_url, 
-                api_key=self.qdrant_api_key,
+                api_key=self.qdrant_api_key if self.qdrant_api_key else None,
                 timeout=20
             )
         else:
-            logging.error("❌ QDRANT URL NOT FOUND!")
-            return
+            logging.error("? QDRANT URL NOT FOUND!")
             
         try:
             collection_info = self.qdrant_client.get_collection(self.qdrant_collection_name)
@@ -203,7 +207,7 @@ class Ingest:
             collection_name=self.qdrant_collection_name,
             embeddings=embeddings
         )
-        logging.info("✅ Vectorstore initialized with Azure OpenAI embeddings.")
+        logging.info("âœ… Vectorstore initialized with Azure OpenAI embeddings.")
 
 
         # ===== AZURE BLOB STORAGE =====
@@ -220,9 +224,9 @@ class Ingest:
             if not self.s3_client.exists():
                 self.s3_client.create_container()
 
-            logging.info(f"✅ Connected to Azure Blob Storage (container={self.s3_bucket_name})")
+            logging.info(f"âœ… Connected to Azure Blob Storage (container={self.s3_bucket_name})")
         except Exception as e:
-            logging.error(f"❌ Failed to connect to Azure Blob Storage: {e}")
+            logging.error(f"âŒ Failed to connect to Azure Blob Storage: {e}")
 
 
         def get_object(*args, **kwargs):
@@ -254,7 +258,7 @@ class Ingest:
         self.s3_client.upload_fileobj = upload_fileobj
         self.s3_client.delete_object = delete_object
 
-        logging.info("✅ Added S3-compatible methods to Azure Blob client for legacy ingestion.")
+        logging.info("âœ… Added S3-compatible methods to Azure Blob client for legacy ingestion.")
 
 
 
@@ -393,19 +397,19 @@ class Ingest:
             if isinstance(s3_paths, str):
                 s3_paths = [s3_paths]
 
-            # ====== NEW: HANDLE FILE UPLOAD → MinIO ======
+            # ====== NEW: HANDLE FILE UPLOAD â†’ MinIO ======
             uploaded_file_path = kwargs.get('uploaded_file_path', '')
             
             if uploaded_file_path and (not s3_paths or s3_paths[0] == ''):
                 # File was uploaded via form-data, need to save to MinIO first
-                logging.info(f"📤 File upload detected: {uploaded_file_path}")
+                logging.info(f"ðŸ“¤ File upload detected: {uploaded_file_path}")
                 
                 try:
                     # Generate S3 key with UUID
                     file_extension = Path(uploaded_file_path).suffix
                     s3_key = f"{course_name}/{uuid.uuid4()}{file_extension}"
                     
-                    logging.info(f"📤 Uploading to Azure Blob Storage: {s3_key}")
+                    logging.info(f"ðŸ“¤ Uploading to Azure Blob Storage: {s3_key}")
                     
                     # Upload to MinIO/S3
                     with open(uploaded_file_path, 'rb') as file_data:
@@ -413,7 +417,7 @@ class Ingest:
                         blob_client.upload_blob(file_data, overwrite=True)
 
                     
-                    logging.info(f"✅ Uploaded to Azure Blob: blob://{self.s3_bucket_name}/{s3_key}")
+                    logging.info(f"âœ… Uploaded to Azure Blob: blob://{self.s3_bucket_name}/{s3_key}")
                     
                     # Update kwargs with s3_path for downstream processing
                     kwargs['s3_path'] = s3_key
@@ -424,15 +428,15 @@ class Ingest:
                     # Clean up temp file
                     try:
                         os.unlink(uploaded_file_path)
-                        logging.info(f"🗑️ Cleaned up temp file: {uploaded_file_path}")
+                        logging.info(f"ðŸ—‘ï¸ Cleaned up temp file: {uploaded_file_path}")
                     except Exception as cleanup_error:
-                        logging.warning(f"⚠️ Could not delete temp file: {cleanup_error}")
+                        logging.warning(f"âš ï¸ Could not delete temp file: {cleanup_error}")
                     
                     # Continue to S3-based ingestion below with the uploaded file
                     
                 except Exception as e:
                     err_msg = f"Failed to upload file to MinIO: {str(e)}"
-                    logging.error(f"❌ {err_msg}")
+                    logging.error(f"âŒ {err_msg}")
                     logging.error(traceback.format_exc())
                     success_status['failure_ingest'] = {'file': uploaded_file_path, 'error': err_msg}
                     
@@ -449,13 +453,13 @@ class Ingest:
             
             if url and (not s3_paths or s3_paths[0] == ''):
                 # Direct URL ingestion (no S3)
-                logging.info(f"🌐 URL-based ingestion detected: {url}")
+                logging.info(f"ðŸŒ URL-based ingestion detected: {url}")
                 
                 try:
                     import requests
                     
                     # Download from URL
-                    logging.info(f"📥 Downloading from URL: {url}")
+                    logging.info(f"ðŸ“¥ Downloading from URL: {url}")
                     response = requests.get(url, timeout=30)
                     response.raise_for_status()
                     
@@ -472,7 +476,7 @@ class Ingest:
                         tmpfile.flush()
                         temp_path = tmpfile.name
                     
-                    logging.info(f"✅ Downloaded to temp file: {temp_path}")
+                    logging.info(f"âœ… Downloaded to temp file: {temp_path}")
                     
                     # Determine ingest method
                     if file_extension in file_ingest_methods:
@@ -482,7 +486,7 @@ class Ingest:
                         ingest_method = self._ingest_single_txt
                     
                     # Call the ingest method with temp file
-                    logging.info(f"🔧 Processing with method: {ingest_method.__name__}")
+                    logging.info(f"ðŸ”§ Processing with method: {ingest_method.__name__}")
                     ret = self._ingest_from_local_file(temp_path, course_name, **kwargs)
                     
                     # Cleanup
@@ -493,27 +497,27 @@ class Ingest:
                     
                     if ret == "Success":
                         success_status['success_ingest'] = url
-                        logging.info(f"✅ Successfully ingested from URL: {url}")
+                        logging.info(f"âœ… Successfully ingested from URL: {url}")
                     else:
                         success_status['failure_ingest'] = {'url': url, 'error': str(ret)}
-                        logging.error(f"❌ Failed to ingest from URL: {url}, error: {ret}")
+                        logging.error(f"âŒ Failed to ingest from URL: {url}, error: {ret}")
                     
                     return success_status
                     
                 except Exception as e:
                     err_msg = f"Failed to ingest from URL {url}: {str(e)}"
-                    logging.error(f"❌ {err_msg}")
+                    logging.error(f"âŒ {err_msg}")
                     logging.error(traceback.format_exc())
                     success_status['failure_ingest'] = {'url': url, 'error': err_msg}
                     return success_status
             
             # ====== EXISTING: S3/MinIO-BASED INGESTION ======
             for s3_path in s3_paths:
-                logging.info(f"📥 Processing from MinIO/S3: {s3_path}")
+                logging.info(f"ðŸ“¥ Processing from MinIO/S3: {s3_path}")
                 
                 file_extension = Path(s3_path).suffix
                 
-                # 🔧 CHANGED: Use get_object instead of download_fileobj
+                # ðŸ”§ CHANGED: Use get_object instead of download_fileobj
                 with NamedTemporaryFile(suffix=file_extension, delete=False) as tmpfile:
                     response = self.s3_client.get_object(Bucket=self.s3_bucket_name, Key=s3_path)
                     tmpfile.write(response['Body'].read())
@@ -555,7 +559,7 @@ class Ingest:
             return success_status
             
         except Exception as e:
-            err = f"❌❌ Error in /ingest: `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
+            err = f"âŒâŒ Error in /ingest: `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
             success_status['failure_ingest'] = {
                 's3_path': s3_path if 's3_path' in locals() else 'unknown',
                 'error': f"MAJOR ERROR DURING INGEST: {err}"
@@ -578,7 +582,7 @@ class Ingest:
         Loads, chunks, embeds, and uploads to Qdrant
         """
         try:
-            logging.info(f"📄 Loading document from: {file_path}")
+            logging.info(f"ðŸ“„ Loading document from: {file_path}")
             
             # Load document
             loader = TextLoader(file_path, encoding='utf-8')
@@ -587,7 +591,7 @@ class Ingest:
             if not documents:
                 return "Failed: No content extracted"
             
-            logging.info(f"✅ Loaded {len(documents)} document(s)")
+            logging.info(f"âœ… Loaded {len(documents)} document(s)")
             
             # Split into chunks
             text_splitter = RecursiveCharacterTextSplitter(
@@ -597,10 +601,10 @@ class Ingest:
             )
             chunks = text_splitter.split_documents(documents)
             
-            logging.info(f"✅ Split into {len(chunks)} chunks")
+            logging.info(f"âœ… Split into {len(chunks)} chunks")
             
             # Generate embeddings and upload
-            logging.info(f"🔧 Generating embeddings for {len(chunks)} chunks...")
+            logging.info(f"ðŸ”§ Generating embeddings for {len(chunks)} chunks...")
             
             points = []
             for i, chunk in enumerate(chunks):
@@ -628,7 +632,7 @@ class Ingest:
                 if (i + 1) % 10 == 0:
                     logging.info(f"   Generated {i + 1}/{len(chunks)} embeddings")
             
-            logging.info(f"✅ Generated all {len(points)} embeddings")
+            logging.info(f"âœ… Generated all {len(points)} embeddings")
             
             # Upload to Qdrant in batches
             batch_size = self.qdrant_upsert_batch_size
@@ -640,13 +644,13 @@ class Ingest:
                 )
                 logging.info(f"   Uploaded batch {i//batch_size + 1} ({len(batch)} points)")
             
-            logging.info(f"✅ Successfully uploaded {len(points)} points to Qdrant")
+            logging.info(f"âœ… Successfully uploaded {len(points)} points to Qdrant")
             
             return "Success"
             
         except Exception as e:
             err_msg = f"Error in _ingest_from_local_file: {str(e)}"
-            logging.error(f"❌ {err_msg}")
+            logging.error(f"âŒ {err_msg}")
             logging.error(traceback.format_exc())
             return f"Failed: {err_msg}"
 
@@ -685,7 +689,7 @@ class Ingest:
             if len(contexts) > 2000:
                 raise ValueError(f"Too many chunks: {len(contexts)}. Document might be corrupted.")
             
-            logging.info(f"✅ Created {len(contexts)} chunks from {len(texts)} texts")
+            logging.info(f"âœ… Created {len(contexts)} chunks from {len(texts)} texts")
             
             input_texts = [{'input': context.page_content, 'model': self.embedding_model} for context in contexts]
 
@@ -702,7 +706,7 @@ class Ingest:
                     #                             'base_url': metadatas[0].get('base_url', None),
                     #                             'is_duplicate': True,
                     #                         })
-                    logging.info("✅ Document is duplicate, skipping")
+                    logging.info("âœ… Document is duplicate, skipping")
                     return "Success"
 
             # adding chunk index to metadata for parent doc retrieval
@@ -713,7 +717,7 @@ class Ingest:
             # ============================================================
             # FIXED: Use Azure OpenAI embeddings directly (not OpenAIAPIProcessor)
             # ============================================================
-            logging.info(f"🔄 Generating embeddings for {len(contexts)} chunks using Azure OpenAI")
+            logging.info(f"ðŸ”„ Generating embeddings for {len(contexts)} chunks using Azure OpenAI")
             embeddings_start_time = time.monotonic()
             
             try:
@@ -739,10 +743,10 @@ class Ingest:
                         time.sleep(2.0)
                 
                 elapsed_time = time.monotonic() - embeddings_start_time
-                logging.info(f"⏰ Embeddings generated in {elapsed_time:.2f} seconds ({len(embeddings_dict)} embeddings)")
+                logging.info(f"â° Embeddings generated in {elapsed_time:.2f} seconds ({len(embeddings_dict)} embeddings)")
                 
             except Exception as e:
-                logging.error(f"❌ Embedding generation failed: {e}")
+                logging.error(f"âŒ Embedding generation failed: {e}")
                 logging.error(traceback.format_exc())
                 raise
 
@@ -844,7 +848,7 @@ class Ingest:
             #                         })
             return "Success"
         except Exception as e:
-            err: str = f"ERROR IN split_and_upload(): Traceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            err: str = f"ERROR IN split_and_upload(): Traceback: {traceback.extract_tb(e.__traceback__)}âŒâŒ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
             print(err)
             sentry_sdk.capture_exception(e)
             sentry_sdk.flush(timeout=20)
@@ -1008,7 +1012,7 @@ class Ingest:
 
             return "Success"
         except Exception as e:
-            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)}âŒâŒ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
             sentry_sdk.capture_exception(e)
             return err
 
@@ -1072,7 +1076,7 @@ class Ingest:
 
             return "Success"
         except Exception as e:
-            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)}âŒâŒ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
             sentry_sdk.capture_exception(e)
             return err
 
@@ -1113,7 +1117,7 @@ class Ingest:
             success_or_failure['success_ingest'] = url
             return success_or_failure
         except Exception as e:
-            err = f"❌❌ Error in (web text ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f"âŒâŒ Error in (web text ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )  # type: ignore
             print(err)
             sentry_sdk.capture_exception(e)
@@ -1150,7 +1154,7 @@ class Ingest:
             return success_or_failure
 
         except Exception as e:
-            err = f"❌❌ Error in (Python ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f"âŒâŒ Error in (Python ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
@@ -1194,7 +1198,7 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"❌❌ Error in (VTT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
+            err = f"âŒâŒ Error in (VTT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
             print(err)
             sentry_sdk.capture_exception(e)
             return err
@@ -1228,7 +1232,7 @@ class Ingest:
             print(f"_ingest_html: {success_or_failure}")
             return success_or_failure
         except Exception as e:
-            err: str = f"ERROR IN _ingest_html: {e}\nTraceback: {traceback.extract_tb(e.__traceback__)}❌❌ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            err: str = f"ERROR IN _ingest_html: {e}\nTraceback: {traceback.extract_tb(e.__traceback__)}âŒâŒ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
             print(err)
             sentry_sdk.capture_exception(e)
             return err
@@ -1362,7 +1366,7 @@ class Ingest:
                     pass
                     
         except Exception as e:
-            err = f"❌❌ Error in (VIDEO ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f"âŒâŒ Error in (VIDEO ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
@@ -1403,7 +1407,7 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"❌❌ Error in (DOCX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f"âŒâŒ Error in (DOCX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
@@ -1439,7 +1443,7 @@ class Ingest:
             self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
             return "Success"
         except Exception as e:
-            err = f"❌❌ Error in (SRT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f"âŒâŒ Error in (SRT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
@@ -1482,7 +1486,7 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"❌❌ Error in (Excel/xlsx ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f"âŒâŒ Error in (Excel/xlsx ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
@@ -1532,7 +1536,7 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"❌❌ Error in (png/jpg ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f"âŒâŒ Error in (png/jpg ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
@@ -1574,7 +1578,7 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"❌❌ Error in (CSV ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f"âŒâŒ Error in (CSV ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
@@ -1603,7 +1607,7 @@ class Ingest:
                 pdf_pages = []
                 with fitz.open(tmp_pdf_path) as pdf_document:
                     num_pages = pdf_document.page_count
-                    print(f"📄 Processing '{s3_path}' with {num_pages} pages")
+                    print(f"Processing '{s3_path}' with {num_pages} pages")
 
                     # Process each page
                     for i, page in enumerate(pdf_document):
@@ -1628,7 +1632,7 @@ class Ingest:
                             )
 
                             with open(tmp_png_path, "rb") as f_png:
-                                print("📤 Uploading first-page thumbnail to MinIO...")
+                                print("ðŸ“¤ Uploading first-page thumbnail to MinIO...")
                                 blob_client = self.s3_client.get_blob_client(s3_upload_path)
                                 blob_client.upload_blob(f_png, overwrite=True)
 
@@ -1657,7 +1661,7 @@ class Ingest:
 
                 self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
                 
-                print(f"✅ Successfully ingested: {s3_path}")
+                print(f"Successfully ingested: {s3_path}")
                 return "Success"
 
             finally:
@@ -1668,7 +1672,7 @@ class Ingest:
                     pass
 
         except Exception as e:
-            err = f"❌❌ Error in PDF ingest (no OCR): `_ingest_single_pdf`: {e}\nTraceback:\n", traceback.format_exc()
+            err = f"Error in PDF ingest (no OCR): `_ingest_single_pdf`: {e}\nTraceback:\n", traceback.format_exc()
             print(err)
             sentry_sdk.capture_exception(e)
             return str(err)
@@ -1733,7 +1737,7 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"❌❌ Error in PDF ingest (with OCR): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
+            err = f"Error in PDF ingest (with OCR): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
             print(err)
             sentry_sdk.capture_exception(e)
             return err
@@ -1773,7 +1777,7 @@ class Ingest:
                                                        force_embeddings=force_embeddings, **kwargs)
             return success_or_failure
         except Exception as e:
-            err = f"❌❌ Error in (TXT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
+            err = f"Error in (TXT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
             print(err)
             sentry_sdk.capture_exception(e)
             return str(err)
@@ -1818,7 +1822,7 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"❌❌ Error in (PPTX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f"Error in (PPTX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
@@ -1860,7 +1864,7 @@ class Ingest:
                 self.split_and_upload(texts=[texts], metadatas=[metadatas], force_embeddings=force_embeddings)
             return "Success"
         except Exception as e:
-            err = f"❌❌ Error in (GITHUB ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n{traceback.format_exc()}"
+            err = f"Error in (GITHUB ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n{traceback.format_exc()}"
             print(err)
             sentry_sdk.capture_exception(e)
             return err

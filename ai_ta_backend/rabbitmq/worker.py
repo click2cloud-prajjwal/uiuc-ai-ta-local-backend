@@ -25,7 +25,7 @@ worker_running = threading.Event()
 class Worker:
 
     def __init__(self):
-        self.rabbitmq_url = os.getenv('RABBITMQ_URL', 'amqp://guest:guest@localhost:5672')
+        self.rabbitmq_url = os.getenv('RABBITMQ_URL', 'amqp://guest:guest@rabbitmq:5672')
         self.rabbitmq_ssl = os.getenv('RABBITMQ_SSL', False)
         self.rabbitmq_queue = os.getenv('RABBITMQ_QUEUE', 'uiuc-chat')
         self.connection: pika.BlockingConnection | None = None
@@ -57,7 +57,7 @@ class Worker:
 
         parameters = pika.URLParameters(self.rabbitmq_url)
 
-        # ✅ Add heartbeat and blocked timeout for long-running ingest tasks
+        # âœ… Add heartbeat and blocked timeout for long-running ingest tasks
         parameters.heartbeat = int(os.getenv("RABBITMQ_HEARTBEAT", "600"))  # 10 min
         parameters.blocked_connection_timeout = int(os.getenv("RABBITMQ_BLOCKED_TIMEOUT", "300"))  # 5 min
 
@@ -69,17 +69,17 @@ class Worker:
         backoff = 1
         while not stop_event.is_set():
             try:
-                logging.info(f"🔌 Connecting to RabbitMQ at {self.rabbitmq_url} ...")
+                logging.info(f"ðŸ”Œ Connecting to RabbitMQ at {self.rabbitmq_url} ...")
                 self.connection = pika.BlockingConnection(parameters)
                 # Narrow to local variable so the checker knows this is not None
                 channel = self.connection.channel()
                 channel.queue_declare(queue=self.rabbitmq_queue, durable=True)
                 # Assign the narrowed local back to the attribute
                 self.channel = channel
-                logging.info("✅ Successfully connected to RabbitMQ.")
+                logging.info("âœ… Successfully connected to RabbitMQ.")
                 return
             except Exception as e:
-                logging.error(f"⚠️ RabbitMQ connection failed: {e}. Retrying in {backoff}s...")
+                logging.error(f"âš ï¸ RabbitMQ connection failed: {e}. Retrying in {backoff}s...")
                 time.sleep(backoff)
                 backoff = min(backoff * 2, BACKOFF_MAX)
 

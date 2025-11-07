@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings('ignore')
+
 import asyncio
 import os
 import time
@@ -12,7 +15,7 @@ from injector import Binder, SingletonScope
 from uuid import uuid4
 
 # --- Core Project Imports ---
-from database.blob import BlobStorage      # ✅ new blob storage
+from database.blob import BlobStorage      #  new blob storage
 from database.sql import SQLDatabase
 from service.response_service import ResponseService
 from service.retrieval_service import RetrievalService
@@ -26,7 +29,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # --------------------------------------------------------------------
-# 🚀 /INGEST
+# ðŸš€ /INGEST
 # --------------------------------------------------------------------
 @app.route('/ingest', methods=['POST'])
 def ingest() -> Response:
@@ -48,13 +51,13 @@ def ingest() -> Response:
             filename = uploaded_file.filename
             temp_path = os.path.join(gettempdir(), filename)
             uploaded_file.save(temp_path)
-            logging.info(f"📂 Saved uploaded file: {temp_path}")
+            logging.info(f"ðŸ“‚ Saved uploaded file: {temp_path}")
 
             # --- Upload to Azure Blob ---
             blob = BlobStorage()
             blob_key = f"uploads/{filename}"
             blob.upload_file(temp_path, blob_key)
-            logging.info(f"✅ Uploaded to Azure Blob: {blob_key}")
+            logging.info(f"âœ… Uploaded to Azure Blob: {blob_key}")
 
             # --- Add job to RabbitMQ queue ---
             data = {
@@ -79,12 +82,12 @@ def ingest() -> Response:
             return jsonify({"error": "Unsupported content type"}), 415
 
     except Exception as e:
-        logging.error(f"❌ Error in /ingest: {e}", exc_info=True)
+        logging.error(f"âŒ Error in /ingest: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
 # --------------------------------------------------------------------
-# 💬 /CHAT
+# ðŸ’¬ /CHAT
 # --------------------------------------------------------------------
 @app.route('/chat', methods=['POST'])
 def chat(retrieval_service: RetrievalService, response_service: ResponseService) -> Response:
@@ -103,7 +106,7 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
             abort(400, description="Missing required parameters: 'question' and 'course_name'")
 
 
-        logging.info(f"💬 Chat request | Course: {course_name} | Question: {question[:80]}...")
+        logging.info(f"ðŸ’¬ Chat request | Course: {course_name} | Question: {question[:80]}...")
 
         # --- Step 1: Retrieve Contexts ---
         contexts = asyncio.run(
@@ -164,7 +167,7 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
                     },
                 )
         except Exception as e:
-            logging.warning(f"⚠️ Failed to store conversation: {e}")
+            logging.warning(f"Failed to store conversation: {e}")
 
         response = jsonify({
             "answer": result["answer"],
@@ -174,16 +177,16 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
             "usage": result.get("usage", {})
         })
         response.headers.add('Access-Control-Allow-Origin', '*')
-        logging.info(f"✅ Chat completed in {(time.monotonic() - start_time):.2f} sec")
+        logging.info(f"âœ… Chat completed in {(time.monotonic() - start_time):.2f} sec")
         return response
 
     except Exception as e:
-        logging.error(f"❌ Error in /chat: {e}", exc_info=True)
+        logging.error(f"âŒ Error in /chat: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
 # --------------------------------------------------------------------
-# 🔧 Dependency Injection Configuration
+# ðŸ”§ Dependency Injection Configuration
 # --------------------------------------------------------------------
 def configure(binder: Binder) -> None:
     binder.bind(RetrievalService, to=RetrievalService, scope=RequestScope)
@@ -195,4 +198,4 @@ FlaskInjector(app=app, modules=[configure])
 
 # --------------------------------------------------------------------
 if __name__ == '__main__':
-    app.run(debug=False, use_reloader=False, port=int(os.getenv("PORT", 8085)))
+    app.run(debug=False,host='0.0.0.0', use_reloader=False, port=int(os.getenv("PORT", 5000)))

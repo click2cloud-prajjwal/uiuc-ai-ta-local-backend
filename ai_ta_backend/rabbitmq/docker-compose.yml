@@ -1,52 +1,46 @@
 version: '3.8'
 
 services:
-  rabbitmq:
-    image: rabbitmq:3-management
-    networks:
-      - uiuc-chat
-    container_name: rabbitmq
-    ports:
-      - "5672:5672"     # AMQP protocol port
-      - "15672:15672"   # Management UI port
-    environment:
-      RABBITMQ_DEFAULT_USER: uiuc-chat-dev
-      RABBITMQ_DEFAULT_PASS: password
-
-  postgres:
-    image: postgis/postgis
-    restart: unless-stopped
-    networks:
-      - uiuc-chat
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5436:5432"
-    environment:
-      POSTGRES_DB: uiuc-chat-dev
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-
+  # Worker
   worker:
     build:
+      context: .
       dockerfile: Dockerfile
+    container_name: uiuc-worker
     restart: unless-stopped
-    networks:
-      - uiuc-chat
     ports:
       - "8001:8001"
-    depends_on:
-      - rabbitmq
-      - postgres
     environment:
+      # RabbitMQ - Hardcoded Docker service name
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      
+      # PostgreSQL - Hardcoded Docker service name
+      POSTGRES_ENDPOINT: postgres
       POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5436
-      POSTGRES_DB: uiuc-chat-dev
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      POSTGRES_PORT: 5432
+      POSTGRES_USERNAME: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DATABASE: uiuc_db
+      
+      # Qdrant - Hardcoded Docker service name
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      QDRANT_COLLECTION_NAME: uiuc-chatbot-test
+      
+    env_file:
+      - ../../.env  # For Azure keys and other shared configs
+    networks:
+      - uiuc-network
 
 volumes:
   postgres_data:
+  qdrant_data:
 
 networks:
-  uiuc-chat:
+  uiuc-network:
+    external: true
