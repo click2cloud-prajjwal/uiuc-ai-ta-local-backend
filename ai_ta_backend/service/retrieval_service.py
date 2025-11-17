@@ -5,14 +5,16 @@ import traceback
 import logging
 from typing import Dict, List, Union
 from injector import inject
-from langchain_community.embeddings import AzureOpenAIEmbeddings
+
 from langchain.schema import Document
+from langchain_community.embeddings import AzureOpenAIEmbeddings
 from qdrant_client.http import models
 
-from database.blob import BlobStorage  
+from database.blob import BlobStorage
 from database.sql import SQLDatabase
 from database.vector import VectorDatabase
 from executors.thread_pool_executor import ThreadPoolExecutorAdapter
+
 
 class RetrievalService:
     """
@@ -33,9 +35,10 @@ class RetrievalService:
         self.blob = blob
         self.thread_pool_executor = thread_pool_executor
 
+        # Azure OpenAI Embeddings 
         self.embeddings = AzureOpenAIEmbeddings(
             azure_deployment=os.environ["EMBEDDING_MODEL"],
-            openai_api_key=os.environ["AZURE_OPENAI_KEY"],
+            openai_api_key=os.environ["AZURE_OPENAI_API_KEY"],
             azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
             chunk_size=1000,
         )
@@ -52,21 +55,20 @@ class RetrievalService:
         top_n: int = 5,
         conversation_id: str = "",
     ) -> Union[List[Dict], str]:
-        """
-        Retrieve top relevant document contexts for a given query.
-        """
+
         if doc_groups is None:
             doc_groups = []
+
         try:
             start_time = time.monotonic()
             logging.info(f"🔍 Retrieving contexts for course: {course_name}")
 
-            # Compute query embedding
+            # Compute query embedding (CLEAN)
             user_query_embedding = self._embed_query_and_measure_latency(
-                search_query, self.embeddings, self.qwen_query_instruction
+                search_query, self.embeddings
             )
 
-            # Perform vector search
+            # Vector search
             found_docs = self.vector_search(
                 search_query=search_query,
                 course_name=course_name,
@@ -105,17 +107,13 @@ class RetrievalService:
         top_n: int = 5,
         conversation_id: str = "",
     ):
-        """
-        Perform vector search on Qdrant for a given query and course.
-        Includes conversation-based filtering if applicable.
-        """
 
         start_time = time.monotonic()
         search_results = []
 
         try:
             if conversation_id:
-                # Combine filters: course and conversation documents
+                # Combine course filter + conversation filter
                 regular_filter = self.vdb._create_search_filter(
                     course_name, doc_groups, [], []
                 )
@@ -132,6 +130,7 @@ class RetrievalService:
                     [],
                     combined_filter,
                 )
+
             else:
                 search_results = self.vdb.vector_search(
                     search_query,
@@ -146,41 +145,30 @@ class RetrievalService:
         except Exception as e:
             logging.error(f"❌ Vector search failed: {e}")
 
+        # Measure Qdrant latency
         self.qdrant_latency_sec = time.monotonic() - start_time
 
-        found_docs = self._process_search_results(search_results, course_name)
-        return found_docs
+        # Process results
+        return self._process_search_results(search_results, course_name)
 
     # ---------------------------------------------------------------------
-    # 🧠 EMBEDDING
+    # 🧠 EMBEDDINGS 
     # ---------------------------------------------------------------------
-    def _embed_query_and_measure_latency(
-        self, search_query, embedding_client, query_instruction: str | None = None
-    ):
+    def _embed_query_and_measure_latency(self, search_query, embedding_client, *_):
+        """Embed query WITHOUT Qwen logic, WITHOUT embedding_model."""
         openai_start_time = time.monotonic()
-        text_to_embed = search_query
 
-        try:
-            model_name = getattr(embedding_client, "model", self.embedding_model)
-        except Exception:
-            model_name = self.embedding_model
-
-        if (
-            query_instruction
-            and isinstance(embedding_client, OpenAIEmbeddings)
-            and "qwen" in str(model_name).lower()
-        ):
-            text_to_embed = f"Instruct: {query_instruction}\nQuery:{search_query}"
+        text_to_embed = search_query  # Direct query text
 
         user_query_embedding = embedding_client.embed_query(text_to_embed)
+
         self.openai_embedding_latency = time.monotonic() - openai_start_time
         return user_query_embedding
 
     # ---------------------------------------------------------------------
-    # 🧩 FILTERING & CONVERSATION SUPPORT
+    # 🧩 CONVERSATION FILTER
     # ---------------------------------------------------------------------
     def _create_conversation_filter(self, conversation_id: str):
-        """Create Qdrant filter for conversation-specific content."""
         return models.Filter(
             must=[
                 models.FieldCondition(
@@ -191,30 +179,36 @@ class RetrievalService:
         )
 
     # ---------------------------------------------------------------------
-    # 🗃️ PROCESS & FORMAT RESULTS
+    # 🗃️ PROCESS QDRANT RESULTS
     # ---------------------------------------------------------------------
     def _process_search_results(self, search_results, course_name):
-        """Process vector search results into structured LangChain docs."""
         found_docs: list[Document] = []
+
         for d in search_results or []:
             try:
                 metadata = d.payload
                 page_content = metadata.get("page_content", "")
+
                 if not page_content.strip():
                     continue
+
                 metadata.pop("page_content", None)
 
-                # Compatibility cleanup
+                # Normalize page number field
                 if "pagenumber" not in metadata and "pagenumber_or_timestamp" in metadata:
                     metadata["pagenumber"] = metadata["pagenumber_or_timestamp"]
 
                 found_docs.append(Document(page_content=page_content, metadata=metadata))
+
             except Exception as e:
                 logging.error(f"⚠️ Error processing doc in {course_name}: {e}")
+
         return found_docs
 
+    # ---------------------------------------------------------------------
+    # 📦 FORMAT OUTPUT FOR JSON
+    # ---------------------------------------------------------------------
     def format_for_json(self, found_docs: List[Document]) -> List[Dict]:
-        """Convert retrieved documents into JSON-ready format."""
         return [
             {
                 "text": doc.page_content,
@@ -228,4 +222,3 @@ class RetrievalService:
             }
             for doc in found_docs
         ]
-    # ---------------------------------------------------------------------
