@@ -1566,20 +1566,26 @@ class Ingest:
 
     def _ingest_single_image(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
-            readable_filename = kwargs.get('readable_filename')
+            # ---------- SAFE readable filename logic ----------
+            readable_filename = kwargs.get("readable_filename")
+
             if not readable_filename:
-                readable_filename = Path(blob_path).name
-                if len(readable_filename) > 37 and readable_filename[36] == '_':
-                    readable_filename = readable_filename[37:]
-            
-            file_extension = Path(readable_filename).suffix or '.png'
+                fname = Path(blob_path).name
+
+                # If filename has UUID prefix like "<uuid>_<original>", split safely
+                parts = fname.split("_", 1)
+                if len(parts) == 2:
+                    readable_filename = parts[1]   # keep right part
+                else:
+                    readable_filename = fname      # fallback
+
+            # Ensure extension
+            file_extension = Path(readable_filename).suffix or ".png"
+
             with NamedTemporaryFile(suffix=file_extension, delete=False) as tmpfile:
-                # download from blob into tmpfile
                 blob_client = self.blob_client.get_blob_client(blob_path)
                 data = blob_client.download_blob().readall()
                 tmpfile.write(data)
-                tmpfile.flush()
-
                 tmpfile.flush()
                 temp_path = tmpfile.name
             
