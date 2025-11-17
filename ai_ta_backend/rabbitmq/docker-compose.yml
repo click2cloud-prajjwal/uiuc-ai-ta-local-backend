@@ -27,11 +27,10 @@ services:
       POSTGRES_DATABASE: uiuc_db
       
       # Qdrant - Hardcoded Docker service name
-      QDRANT_URL: http://qdrant:6333
+      QDRANT_URL: http://20.3.237.15:6333
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
-      QDRANT_COLLECTION_NAME: uiuc-chatbot-test
-      
+      QDRANT_COLLECTION_NAME: chatbot-embeddings
     env_file:
       - ../../.env  # For Azure keys and other shared configs
     networks:

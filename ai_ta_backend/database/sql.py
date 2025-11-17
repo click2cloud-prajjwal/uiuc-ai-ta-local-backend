@@ -91,19 +91,19 @@ class SQLDatabase:
         except SQLAlchemyError as e:
             logging.error(f"❌ Failed to record failed document: {e}")
 
-    def delete_document_by_s3_path(self, course_name: str, s3_path: str):
-        """Delete document records by S3 path."""
+    def delete_document_by_blob_path(self, course_name: str, blob_path: str):
+        """Delete document records by blob path."""
         try:
             with self.get_session() as session:
                 stmt = (
                     delete(models.Document)
-                    .where(models.Document.s3_path == s3_path)
+                    .where(models.Document.blob_path == blob_path)
                     .where(models.Document.course_name == course_name)
                 )
                 session.execute(stmt)
-                logging.info(f"🗑️ Deleted document {s3_path} from {course_name}")
+                logging.info(f"🗑️ Deleted document {blob_path} from {course_name}")
         except Exception as e:
-            logging.error(f"❌ Failed to delete document by s3_path: {e}")
+            logging.error(f"❌ Failed to delete document by blob_path: {e}")
 
     def delete_document_by_url(self, course_name: str, url: str):
         """Delete document records by source URL."""
@@ -132,12 +132,12 @@ class SQLDatabase:
         except Exception as e:
             logging.warning(f"⚠️ Failed to delete in-progress document: {e}")
 
-    def get_like_docs_by_s3_path(self, course_name: str, filename: str):
+    def get_like_docs_by_blob_path(self, course_name: str, filename: str):
         """Check for similar documents (used for duplicate detection)."""
         query = (
             select(models.Document)
             .where(models.Document.course_name == course_name)
-            .where(models.Document.s3_path.like(f"%{filename}%"))
+            .where(models.Document.blob_path.like(f"%{filename}%"))
         )
         with self.get_session() as session:
             result = session.execute(query).scalars().all()
@@ -155,6 +155,34 @@ class SQLDatabase:
             result = session.execute(query).scalars().all()
             data = [orm_to_dict(doc) for doc in result]
             return {"data": data}
+
+    def insert_doc_group(self, name: str, course_name: str, enabled: bool = True, private: bool = True, doc_count: int = 0):
+        """Insert or retrieve a doc_group entry."""
+        try:
+            with self.get_session() as session:
+                existing = (
+                    session.query(models.DocGroup)
+                    .filter_by(name=name, course_name=course_name)
+                    .first()
+                )
+                if existing:
+                    logging.info(f"⚠️ Doc group '{name}' already exists for course '{course_name}'.")
+                    return existing.id
+
+                new_group = models.DocGroup(
+                    name=name,
+                    course_name=course_name,
+                    enabled=enabled,
+                    private=private,
+                    doc_count=doc_count,
+                )
+                session.add(new_group)
+                session.flush()  # get the new ID before commit
+                logging.info(f"✅ Created new doc_group '{name}' for course '{course_name}'.")
+                return new_group.id
+        except Exception as e:
+            logging.error(f"❌ Failed to insert doc_group '{name}': {e}")
+            return None
 
     # ==========================================================
     # 💬 Used in Chat / Response (conversations + stats)

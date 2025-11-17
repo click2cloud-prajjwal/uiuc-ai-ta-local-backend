@@ -5,25 +5,14 @@ import traceback
 import logging
 from typing import Dict, List, Union
 from injector import inject
-
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.embeddings.ollama import OllamaEmbeddings
+from langchain_community.embeddings import AzureOpenAIEmbeddings
 from langchain.schema import Document
 from qdrant_client.http import models
 
-from database.blob import BlobStorage  # ✅ replaced AWSStorage
+from database.blob import BlobStorage  
 from database.sql import SQLDatabase
 from database.vector import VectorDatabase
 from executors.thread_pool_executor import ThreadPoolExecutorAdapter
-
-
-
-DEFAULT_QWEN_QUERY_INSTRUCTION = (
-    "Given a user search query, retrieve the most relevant passages "
-    "from the knowledge base stored in Qdrant to answer the query accurately. "
-    "Prioritize authoritative course materials and official documents."
-)
-
 
 class RetrievalService:
     """
@@ -44,32 +33,13 @@ class RetrievalService:
         self.blob = blob
         self.thread_pool_executor = thread_pool_executor
 
-        # Embedding configuration
-        self.openai_api_key = os.getenv("OPENAI_API_KEY", "")
-        self.embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
-
-        if os.getenv("OPENAI_API_TYPE") == "azure":
-            from langchain_community.embeddings import AzureOpenAIEmbeddings
-
-            self.embeddings = AzureOpenAIEmbeddings(
-                azure_deployment=os.environ["AZURE_OPENAI_ENGINE"],
-                openai_api_key=os.environ["AZURE_OPENAI_KEY"],
-                azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-                openai_api_version=os.environ["OPENAI_API_VERSION"],
-                chunk_size=1000,
-            )
-            logging.info("✅ Using Azure OpenAI embeddings")
-        else:
-            self.embeddings = OllamaEmbeddings(
-                base_url=os.environ.get("OLLAMA_SERVER_URL", "http://localhost:11434"),
-                model="nomic-embed-text:v1.5",
-            )
-            logging.info("✅ Using Ollama embeddings (local)")
-
-        # Optional override
-        self.qwen_query_instruction = os.getenv(
-            "QWEN_QUERY_INSTRUCTION", DEFAULT_QWEN_QUERY_INSTRUCTION
+        self.embeddings = AzureOpenAIEmbeddings(
+            azure_deployment=os.environ["EMBEDDING_MODEL"],
+            openai_api_key=os.environ["AZURE_OPENAI_KEY"],
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            chunk_size=1000,
         )
+        logging.info("✅ Using Azure OpenAI embeddings")
 
     # ---------------------------------------------------------------------
     # 🔍 MAIN RETRIEVAL FUNCTION
@@ -250,7 +220,7 @@ class RetrievalService:
                 "text": doc.page_content,
                 "readable_filename": doc.metadata.get("readable_filename"),
                 "course_name": doc.metadata.get("course_name"),
-                "s3_path": doc.metadata.get("s3_path"),
+                "blob_path": doc.metadata.get("blob_path"),
                 "pagenumber": doc.metadata.get("pagenumber"),
                 "url": doc.metadata.get("url"),
                 "base_url": doc.metadata.get("base_url"),

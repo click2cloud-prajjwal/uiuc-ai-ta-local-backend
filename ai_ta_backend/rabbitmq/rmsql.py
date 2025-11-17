@@ -153,7 +153,7 @@ class SQLAlchemyIngestDB:
     def add_document_to_group_url(self, contexts, groups):
         params = {
             "p_course_name": contexts[0].metadata.get('course_name'),
-            "p_s3_path": contexts[0].metadata.get('s3_path'),
+            "p_blob_path": contexts[0].metadata.get('blob_path'),
             "p_url": contexts[0].metadata.get('url'),
             "p_readable_filename": contexts[0].metadata.get('readable_filename'),
             "p_doc_groups": groups,
@@ -162,7 +162,7 @@ class SQLAlchemyIngestDB:
         with self.get_session() as session:
             try:
                 result = session.execute(text(
-                    "SELECT * FROM add_document_to_group_url(:p_course_name, :p_s3_path, :p_url, :p_readable_filename, :p_doc_groups)"),
+                    "SELECT * FROM add_document_to_group_url(:p_course_name, :p_blob_path, :p_url, :p_readable_filename, :p_doc_groups)"),
                                               params)
                 count = result.rowcount if result.returns_rows else 0  # Number of affected rows or results
                 return count
@@ -173,7 +173,7 @@ class SQLAlchemyIngestDB:
     def add_document_to_group(self, contexts, groups):
         params = {
             "p_course_name": contexts[0].metadata.get('course_name'),
-            "p_s3_path": contexts[0].metadata.get('s3_path'),
+            "p_blob_path": contexts[0].metadata.get('blob_path'),
             "p_url": contexts[0].metadata.get('url'),
             "p_readable_filename": contexts[0].metadata.get('readable_filename'),
             "p_doc_groups": groups,
@@ -181,7 +181,7 @@ class SQLAlchemyIngestDB:
         with self.get_session() as session:
             try:
                 result = session.execute(text(
-                    "SELECT * FROM add_document_to_group(:p_course_name, :p_s3_path, :p_url, :p_readable_filename, :p_doc_groups)"),
+                    "SELECT * FROM add_document_to_group(:p_course_name, :p_blob_path, :p_url, :p_readable_filename, :p_doc_groups)"),
                                               params)
 
                 count = result.rowcount if result.returns_rows else 0  # Number of affected rows or results
@@ -190,11 +190,11 @@ class SQLAlchemyIngestDB:
                 logging.error(f"Stored procedure execution failed: {e}")
                 return None, 0
 
-    def get_like_docs_by_s3_path(self, course_name, original_filename):
+    def get_like_docs_by_blob_path(self, course_name, original_filename):
         query = (
-            select(models.Document.id, models.Document.contexts, models.Document.s3_path)
+            select(models.Document.id, models.Document.contexts, models.Document.blob_path)
             .where(models.Document.course_name == course_name)
-            .where(models.Document.s3_path.like(f"%{original_filename}%"))
+            .where(models.Document.blob_path.like(f"%{original_filename}%"))
             .order_by(desc(models.Document.id))
         )
 
@@ -216,10 +216,10 @@ class SQLAlchemyIngestDB:
             response = DatabaseResponse(data=result, count=len(result)).to_dict()
         return response
 
-    def delete_document_by_s3_path(self, course_name: str, s3_path: str):
+    def delete_document_by_blob_path(self, course_name: str, blob_path: str):
         delete_stmt = (
             delete(models.Document)
-            .where(models.Document.s3_path == s3_path)
+            .where(models.Document.blob_path == blob_path)
             .where(models.Document.course_name == course_name)
         )
 

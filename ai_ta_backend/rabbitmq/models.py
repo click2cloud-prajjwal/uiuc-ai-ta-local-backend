@@ -30,7 +30,7 @@ class Document(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     created_at = Column(DateTime, default=func.now())
-    s3_path = Column(Text)  # compatible with Blob key names
+    blob_path = Column(Text)  # compatible with Blob key names
     readable_filename = Column(Text)
     course_name = Column(Text)
     url = Column(Text)
@@ -41,7 +41,7 @@ class Document(Base):
         return {
             "id": self.id,
             "created_at": self.created_at,
-            "s3_path": self.s3_path,
+            "blob_path": self.blob_path,
             "readable_filename": self.readable_filename,
             "course_name": self.course_name,
             "url": self.url,
@@ -58,7 +58,7 @@ class DocumentsInProgress(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     created_at = Column(DateTime, default=func.now())
-    s3_path = Column(Text)
+    blob_path = Column(Text)
     readable_filename = Column(Text)
     course_name = Column(Text)
     url = Column(Text)
@@ -72,7 +72,7 @@ class DocumentsInProgress(Base):
         return {
             "id": self.id,
             "created_at": self.created_at,
-            "s3_path": self.s3_path,
+            "blob_path": self.blob_path,
             "readable_filename": self.readable_filename,
             "course_name": self.course_name,
             "url": self.url,
@@ -89,7 +89,7 @@ class DocumentsFailed(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     created_at = Column(DateTime, default=func.now())
-    s3_path = Column(Text)
+    blob_path = Column(Text)
     readable_filename = Column(Text)
     course_name = Column(Text)
     url = Column(Text)
@@ -102,7 +102,7 @@ class DocumentsFailed(Base):
         return {
             "id": self.id,
             "created_at": self.created_at,
-            "s3_path": self.s3_path,
+            "blob_path": self.blob_path,
             "readable_filename": self.readable_filename,
             "course_name": self.course_name,
             "url": self.url,
@@ -199,4 +199,28 @@ class ProjectStats(Base):
             "model_usage_counts": self.model_usage_counts,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+        }
+# ---------------------------------------------------------------------
+# 🗂️ Doc Groups (stores document group metadata)
+# ---------------------------------------------------------------------
+class DocGroup(Base):
+    __tablename__ = 'doc_groups'
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    name = Column(Text, nullable=False)
+    course_name = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    enabled = Column(Boolean, default=True)
+    private = Column(Boolean, default=True)
+    doc_count = Column(BigInteger, default=0)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "course_name": self.course_name,
+            "created_at": self.created_at,
+            "enabled": self.enabled,
+            "private": self.private,
+            "doc_count": self.doc_count,
         }

@@ -1,6 +1,6 @@
 """
 Complete Database Migration - All Tables from models.py
-Creates ALL required tables for the AI-TA backend
+Creates ALL required tables and functions for the AI-TA backend (with blob_path instead of s3_path)
 """
 import os
 from dotenv import load_dotenv
@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, text
 load_dotenv()
 
 print("=" * 70)
-print("🗄️  COMPLETE DATABASE MIGRATION")
+print("COMPLETE DATABASE MIGRATION (with stored functions + constraints)")
 print("=" * 70)
 
 # Get database credentials
@@ -22,30 +22,37 @@ POSTGRES_DATABASE = os.getenv('POSTGRES_DATABASE')
 # Build connection string
 db_uri = f"postgresql://{POSTGRES_USERNAME}:{POSTGRES_PASSWORD}@{POSTGRES_ENDPOINT}:{POSTGRES_PORT}/{POSTGRES_DATABASE}"
 
-print(f"\n📋 Database: {POSTGRES_ENDPOINT}:{POSTGRES_PORT}/{POSTGRES_DATABASE}")
+print(f"\nDatabase: {POSTGRES_ENDPOINT}:{POSTGRES_PORT}/{POSTGRES_DATABASE}")
 
-# Complete SQL with ALL tables from models.py
+# ============================================================
+# UPDATED MIGRATION SQL (blob_path everywhere)
+# ============================================================
 complete_migration_sql = """
--- Enable UUID extension
+-- ============================================================
+-- EXTENSIONS
+-- ============================================================
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- 1. Documents table (main documents)
+-- ============================================================
+-- 1. DOCUMENTS TABLE
+-- ============================================================
 CREATE TABLE IF NOT EXISTS documents (
     id BIGSERIAL PRIMARY KEY,
     created_at TIMESTAMP DEFAULT NOW(),
-    s3_path TEXT,
+    blob_path TEXT,
     readable_filename TEXT,
     course_name TEXT,
     url TEXT,
     contexts JSON DEFAULT '[{"text": "", "timestamp": "", "embedding": "", "pagenumber": ""}]',
     base_url TEXT
 );
-
 CREATE INDEX IF NOT EXISTS documents_course_name_idx ON documents USING HASH (course_name);
-CREATE INDEX IF NOT EXISTS documents_created_at_idx ON documents USING BTREE (created_at);
-CREATE INDEX IF NOT EXISTS idx_doc_s3_path ON documents USING BTREE (s3_path);
+CREATE INDEX IF NOT EXISTS idx_doc_blob_path ON documents USING BTREE (blob_path);
 
--- 2. Doc Groups table
+-- ============================================================
+-- 2. DOC GROUPS TABLE
+-- ============================================================
 CREATE TABLE IF NOT EXISTS doc_groups (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
@@ -56,24 +63,35 @@ CREATE TABLE IF NOT EXISTS doc_groups (
     doc_count BIGINT
 );
 
-CREATE INDEX IF NOT EXISTS doc_groups_enabled_course_name_idx ON doc_groups USING BTREE (enabled, course_name);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'unique_docgroup_name_per_course'
+    ) THEN
+        ALTER TABLE doc_groups
+        ADD CONSTRAINT unique_docgroup_name_per_course UNIQUE (name, course_name);
+    END IF;
+END
+$$;
 
--- 3. Documents-DocGroups junction table
+-- ============================================================
+-- 3. DOCUMENTS-DOCGROUPS LINK TABLE
+-- ============================================================
 CREATE TABLE IF NOT EXISTS documents_doc_groups (
-    document_id BIGINT,
+    document_id BIGINT REFERENCES documents(id) ON DELETE CASCADE,
     doc_group_id BIGINT REFERENCES doc_groups(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT NOW(),
     PRIMARY KEY (document_id, doc_group_id)
 );
-
 CREATE INDEX IF NOT EXISTS documents_doc_groups_doc_group_id_idx ON documents_doc_groups USING BTREE (doc_group_id);
-CREATE INDEX IF NOT EXISTS documents_doc_groups_document_id_idx ON documents_doc_groups USING BTREE (document_id);
 
--- 4. Documents In Progress table
+-- ============================================================
+-- 4. DOCUMENTS IN PROGRESS
+-- ============================================================
 CREATE TABLE IF NOT EXISTS documents_in_progress (
     id BIGSERIAL PRIMARY KEY,
     created_at TIMESTAMP DEFAULT NOW(),
-    s3_path TEXT,
+    blob_path TEXT,
     readable_filename TEXT,
     course_name TEXT,
     url TEXT,
@@ -84,11 +102,13 @@ CREATE TABLE IF NOT EXISTS documents_in_progress (
     beam_task_id TEXT DEFAULT gen_random_uuid()::TEXT
 );
 
--- 5. Documents Failed table
+-- ============================================================
+-- 5. DOCUMENTS FAILED
+-- ============================================================
 CREATE TABLE IF NOT EXISTS documents_failed (
     id BIGSERIAL PRIMARY KEY,
     created_at TIMESTAMP DEFAULT NOW(),
-    s3_path TEXT,
+    blob_path TEXT,
     readable_filename TEXT,
     course_name TEXT,
     url TEXT,
@@ -98,7 +118,9 @@ CREATE TABLE IF NOT EXISTS documents_failed (
     error TEXT
 );
 
--- 6. Projects table
+-- ============================================================
+-- 6. PROJECTS TABLE
+-- ============================================================
 CREATE TABLE IF NOT EXISTS projects (
     id BIGSERIAL PRIMARY KEY,
     created_at TIMESTAMP DEFAULT NOW(),
@@ -112,10 +134,11 @@ CREATE TABLE IF NOT EXISTS projects (
     description TEXT,
     metadata_schema JSON
 );
+CREATE UNIQUE INDEX IF NOT EXISTS projects_course_name_key ON projects(course_name);
 
-CREATE UNIQUE INDEX IF NOT EXISTS projects_course_name_key ON projects USING BTREE (course_name);
-
--- 7. Project Stats table
+-- ============================================================
+-- 7. PROJECT STATS TABLE
+-- ============================================================
 CREATE TABLE IF NOT EXISTS project_stats (
     id BIGSERIAL PRIMARY KEY,
     project_id BIGINT,
@@ -128,13 +151,17 @@ CREATE TABLE IF NOT EXISTS project_stats (
     model_usage_counts JSON
 );
 
--- 8. N8N Workflows table
+-- ============================================================
+-- 8. N8N WORKFLOWS
+-- ============================================================
 CREATE TABLE IF NOT EXISTS n8n_workflows (
     latest_workflow_id BIGSERIAL PRIMARY KEY,
     is_locked BOOLEAN NOT NULL
 );
 
--- 9. LLM Conversation Monitor table
+-- ============================================================
+-- 9. LLM CONVO MONITOR
+-- ============================================================
 CREATE TABLE IF NOT EXISTS "llm-convo-monitor" (
     id BIGSERIAL PRIMARY KEY,
     created_at TIMESTAMP DEFAULT NOW(),
@@ -144,9 +171,9 @@ CREATE TABLE IF NOT EXISTS "llm-convo-monitor" (
     user_email TEXT
 );
 
-CREATE INDEX IF NOT EXISTS llm_convo_monitor_course_name_idx ON "llm-convo-monitor" USING HASH (course_name);
-
--- 10. Conversations table
+-- ============================================================
+-- 10. CONVERSATIONS & MESSAGES
+-- ============================================================
 CREATE TABLE IF NOT EXISTS conversations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR,
@@ -160,9 +187,6 @@ CREATE TABLE IF NOT EXISTS conversations (
     folder_id UUID
 );
 
-CREATE INDEX IF NOT EXISTS idx_user_email_updated_at ON conversations USING BTREE (user_email, updated_at);
-
--- 11. Messages table
 CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
@@ -179,7 +203,9 @@ CREATE TABLE IF NOT EXISTS messages (
     image_description TEXT
 );
 
--- 12. Pre-Authorized API Keys table
+-- ============================================================
+-- 11. PRE-AUTHORIZED API KEYS
+-- ============================================================
 CREATE TABLE IF NOT EXISTS pre_authorized_api_keys (
     id BIGSERIAL PRIMARY KEY,
     created_at TIMESTAMP DEFAULT NOW(),
@@ -188,51 +214,80 @@ CREATE TABLE IF NOT EXISTS pre_authorized_api_keys (
     providerName TEXT,
     notes TEXT
 );
+
+-- ============================================================
+-- STORED PROCEDURES (for ingestion)
+-- ============================================================
+CREATE OR REPLACE FUNCTION add_document_to_group(
+    p_course_name TEXT,
+    p_blob_path TEXT,
+    p_url TEXT,
+    p_readable_filename TEXT,
+    p_doc_groups TEXT[]
+)
+RETURNS VOID AS $$
+BEGIN
+    INSERT INTO doc_groups (name, course_name, enabled, private, doc_count)
+    SELECT unnest(p_doc_groups), p_course_name, TRUE, FALSE, 0
+    ON CONFLICT (name, course_name) DO NOTHING;
+
+    INSERT INTO documents_doc_groups (document_id, doc_group_id)
+    SELECT d.id, g.id
+    FROM documents d
+    JOIN doc_groups g ON g.name = ANY(p_doc_groups) AND g.course_name = p_course_name
+    WHERE d.blob_path = p_blob_path OR d.url = p_url;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION add_document_to_group_url(
+    p_course_name TEXT,
+    p_blob_path TEXT,
+    p_url TEXT,
+    p_readable_filename TEXT,
+    p_doc_groups TEXT[]
+)
+RETURNS VOID AS $$
+BEGIN
+    PERFORM add_document_to_group(p_course_name, p_blob_path, p_url, p_readable_filename, p_doc_groups);
+END;
+$$ LANGUAGE plpgsql;
 """
 
+# ============================================================
+# EXECUTE MIGRATION
+# ============================================================
 try:
     engine = create_engine(db_uri)
-    
-    print("\n🔌 Connecting to database...")
+    print("\nConnecting to database...")
     with engine.connect() as conn:
-        print("\n📦 Creating all tables...")
+        print("\nCreating tables and stored functions...")
         conn.execute(text(complete_migration_sql))
         conn.commit()
-        
-        print("\n✅ Verifying tables...")
+
+        print("\nVerifying tables...")
         result = conn.execute(text("""
-            SELECT 
-                table_name,
-                (SELECT COUNT(*) FROM information_schema.columns 
-                 WHERE table_name = t.table_name AND table_schema = 'public') as column_count
-            FROM information_schema.tables t
-            WHERE table_schema = 'public' 
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
             AND table_type = 'BASE TABLE'
             ORDER BY table_name;
         """))
-        
-        tables = list(result)
-        print(f"\n   Created {len(tables)} table(s):")
-        for table_name, col_count in tables:
-            print(f"   ✅ {table_name:35} ({col_count} columns)")
-    
+        tables = [row[0] for row in result]
+        print(f"\nCreated {len(tables)} tables:")
+        for t in tables:
+            print(f"   {t}")
+
     print("\n" + "=" * 70)
-    print("✅ COMPLETE MIGRATION SUCCESSFUL!")
+    print("COMPLETE MIGRATION SUCCESSFUL")
     print("=" * 70)
-    print("\n📊 Database now contains:")
-    print("   • Document management (documents, documents_in_progress, documents_failed)")
-    print("   • Document organization (doc_groups, documents_doc_groups)")
-    print("   • Project management (projects, project_stats)")
-    print("   • Conversation tracking (conversations, messages, llm-convo-monitor)")
-    print("   • API key management (pre_authorized_api_keys)")
-    print("   • Workflow management (n8n_workflows)")
-    print("\n🎯 Your backend is now fully ready!")
+    print("\nIncludes:")
+    print("   • blob_path renamed everywhere (formerly s3_path)")
+    print("   • UNIQUE constraint on doc_groups(name, course_name) handled safely")
+    print("   • Stored procedures add_document_to_group & add_document_to_group_url")
+    print("   • All core document and conversation tables ready")
     print("=" * 70)
-    
+
 except Exception as e:
-    print(f"\n❌ Error: {e}")
-    print("\n💡 Troubleshooting:")
-    print("   1. Check PostgreSQL is running: docker ps | grep postgres")
-    print("   2. Verify .env database credentials")
+    print(f"\nError: {e}")
     import traceback
     traceback.print_exc()

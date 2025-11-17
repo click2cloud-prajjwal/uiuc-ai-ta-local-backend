@@ -61,7 +61,7 @@ class Queue:
 
         # SQL record first
         doc_progress_payload = models.DocumentsInProgress(
-            s3_path=inputs['s3_paths'][0] if 's3_paths' in inputs else '',
+            blob_path=inputs['blob_path'][0] if 'blob_path' in inputs else '',
             readable_filename=inputs['readable_filename'],
             course_name=inputs['course_name']
         )

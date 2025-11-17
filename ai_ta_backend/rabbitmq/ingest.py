@@ -33,16 +33,9 @@ from langchain_community.document_loaders import (
       CSVLoader,
 )
 
-# Updated embeddings import - use AzureOpenAIEmbeddings from langchain_openai
-from langchain_openai import AzureOpenAIEmbeddings, OpenAIEmbeddings
-
-# Updated schema import
+from langchain_openai import AzureOpenAIEmbeddings
 from langchain_core.documents import Document
-
-# Updated text splitter import
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-# Updated vectorstore import
 from langchain_qdrant import Qdrant
 
 import fitz
@@ -72,19 +65,29 @@ class Ingest:
     def __init__(self):
         # Azure OpenAI credentials (standardized)
         self.azure_openai_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
-        self.azure_openai_key = os.getenv('AZURE_OPENAI_KEY')
+        self.azure_openai_key = os.getenv('AZURE_OPENAI_API_KEY')
         self.embedding_model = os.getenv('EMBEDDING_MODEL')
         
         # Qdrant credentials
         self.qdrant_url = os.getenv('QDRANT_URL','http://qdrant:6333')
         self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
         self.qdrant_collection_name = os.getenv('QDRANT_COLLECTION_NAME', 'uiuc-chatbot')
+
+        whisper_endpoint = os.getenv('AZURE_WHISPER_ENDPOINT')
+        whisper_key = os.getenv('AZURE_WHISPER_KEY')
         
-        # S3/MinIO credentials
-        self.minio_url = os.getenv('MINIO_URL')
-        self.aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
-        self.aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
-        self.s3_bucket_name = os.getenv('S3_BUCKET_NAME')
+        if whisper_endpoint and whisper_key:
+            from openai import AzureOpenAI
+            self.whisper_client = AzureOpenAI(
+                api_key=whisper_key,
+                azure_endpoint=whisper_endpoint
+            )
+            self.whisper_deployment = os.getenv('AZURE_WHISPER_DEPLOYMENT', 'whisper')
+            logging.info("✅ Whisper client initialized successfully")
+        else:
+            self.whisper_client = None
+            self.whisper_deployment = None
+            logging.warning("⚠️ Whisper credentials not found. Audio/video ingestion will be skipped.")
         
                 # === Cross-platform Tesseract setup ===
         try:
@@ -93,18 +96,18 @@ class Ingest:
                 tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
                 if os.path.exists(tesseract_path):
                     pytesseract.pytesseract.tesseract_cmd = tesseract_path
-                    logging.info(f"âœ… Windows: Tesseract found at {tesseract_path}")
+                    logging.info(f" Windows: Tesseract found at {tesseract_path}")
                 else:
-                    logging.warning("âš ï¸ Windows: Tesseract not found at default path. OCR features may not work.")
+                    logging.warning("Windows: Tesseract not found at default path. OCR features may not work.")
             else:
                 # Linux / macOS / Docker (Debian slim)
                 result = shutil.which("tesseract")
 
                 if result:
                     pytesseract.pytesseract.tesseract_cmd = result
-                    logging.info(f"âœ… Linux: Tesseract found at {result}")
+                    logging.info(f" Linux: Tesseract found at {result}")
                 else:
-                    logging.warning("âš ï¸ Linux: Tesseract not found in PATH. Attempting to install...")
+                    logging.warning("Linux: Tesseract not found in PATH. Attempting to install...")
 
                     # Attempt to install tesseract automatically
                     try:
@@ -115,21 +118,21 @@ class Ingest:
                         result = shutil.which("tesseract")
                         if result:
                             pytesseract.pytesseract.tesseract_cmd = result
-                            logging.info(f"âœ… Successfully installed Tesseract at {result}")
+                            logging.info(f" Successfully installed Tesseract at {result}")
                         else:
-                            logging.error("âŒ Tesseract installation completed but binary not found in PATH.")
+                            logging.error(" Tesseract installation completed but binary not found in PATH.")
                     except Exception as install_err:
-                        logging.error(f"âŒ Failed to install Tesseract automatically: {install_err}")
+                        logging.error(f" Failed to install Tesseract automatically: {install_err}")
 
         except Exception as e:
-            logging.error(f"âŒ Error while configuring Tesseract OCR: {e}")
+            logging.error(f" Error while configuring Tesseract OCR: {e}")
 
 
         # Runtime objects
         # self.posthog = None
         self.qdrant_client = None
         self.vectorstore = None
-        self.s3_client = None
+        self.blob_client = None
         self.sql_session = None
 
         # Qdrant ingestion tuning
@@ -137,9 +140,39 @@ class Ingest:
         self.qdrant_indexing_threshold_ingest = int(os.getenv('QDRANT_INDEXING_THRESHOLD_INGEST', '100000000'))
         self.qdrant_indexing_threshold_online = int(os.getenv('QDRANT_INDEXING_THRESHOLD_ONLINE', '1000'))
 
-        # # OpenAI API settings
-        # self.openai_api_base = os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1')
-        # self.ncsa_hosted_api_key = os.getenv('NCSA_HOSTED_API_KEY', os.getenv('OPENAI_API_KEY'))
+    def get_tesseract_lang_from_docgroups(self, doc_groups):
+        """
+        Map doc_groups to appropriate Tesseract OCR language codes.
+        Returns a single tesseract language code (e.g. 'hin', 'mar', 'eng').
+        """
+        # Normalize to list
+        if not doc_groups:
+            return "eng"
+
+        if isinstance(doc_groups, str):
+            doc_list = [doc_groups]
+        else:
+            doc_list = list(doc_groups) if hasattr(doc_groups, '__iter__') else [str(doc_groups)]
+
+        # pick the first meaningful group
+        doc_group = str(doc_list[0]).lower().strip()
+
+        lang_map = {
+            "hindi": "hin",
+            "marathi": "mar",
+            "punjabi": "pan",
+            "gujarati": "guj",
+            "telugu": "tel",
+            "tamil": "tam"
+        }
+
+        for key, val in lang_map.items():
+            if key in doc_group:
+                return val
+
+        # fallback to English
+        return "eng"
+
 
     def initialize_resources(self):
         """Initialize Qdrant client and vectorstore with Azure OpenAI embeddings"""
@@ -196,8 +229,7 @@ class Ingest:
         # Initialize Azure OpenAI embeddings
         embeddings = AzureOpenAIEmbeddings(
             azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=os.getenv("AZURE_OPENAI_KEY"),
-            api_version=os.environ["OPENAI_API_VERSION"],
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
             model=os.environ["EMBEDDING_MODEL"],
             deployment=os.environ["EMBEDDING_MODEL"]
         )
@@ -207,7 +239,7 @@ class Ingest:
             collection_name=self.qdrant_collection_name,
             embeddings=embeddings
         )
-        logging.info("âœ… Vectorstore initialized with Azure OpenAI embeddings.")
+        logging.info(" Vectorstore initialized with Azure OpenAI embeddings.")
 
 
         # ===== AZURE BLOB STORAGE =====
@@ -215,61 +247,54 @@ class Ingest:
             account_name = os.getenv("AZURE_SA_NAME")
             account_key = os.getenv("AZURE_SA_ACCESSKEY")
             connection_string = f"DefaultEndpointsProtocol=https;AccountName={account_name};AccountKey={account_key};EndpointSuffix=core.windows.net"
-            self.s3_bucket_name = os.getenv("AZURE_BLOB_CONTAINER", "uiuc-chatbot")
+            self.blob_container = os.getenv("AZURE_BLOB_CONTAINER", "uiuc-chatbot")
 
             blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-            self.s3_client = blob_service_client.get_container_client(self.s3_bucket_name)
+            self.blob_client = blob_service_client.get_container_client(self.blob_container)
 
             # Ensure container exists
-            if not self.s3_client.exists():
-                self.s3_client.create_container()
+            if not self.blob_client.exists():
+                self.blob_client.create_container()
 
-            logging.info(f"âœ… Connected to Azure Blob Storage (container={self.s3_bucket_name})")
+            logging.info(f" Connected to Azure Blob Storage (container={self.blob_container})")
         except Exception as e:
-            logging.error(f"âŒ Failed to connect to Azure Blob Storage: {e}")
+            logging.error(f" Failed to connect to Azure Blob Storage: {e}")
 
 
         def get_object(*args, **kwargs):
             key = kwargs.get("Key") or args[1]
-            blob_client = self.s3_client.get_blob_client(key)
+            blob_client = self.blob_client.get_blob_client(key)
             blob_data = blob_client.download_blob().readall()
             return {"Body": io.BytesIO(blob_data)}
 
         def download_fileobj(*args, **kwargs):
             key = kwargs.get("Key") or args[1]
             fileobj = kwargs.get("Fileobj") or args[2]
-            blob_client = self.s3_client.get_blob_client(key)
+            blob_client = self.blob_client.get_blob_client(key)
             stream = blob_client.download_blob()
             fileobj.write(stream.readall())
 
         def upload_fileobj(*args, **kwargs):
             fileobj = args[0]
             key = kwargs.get("Key") or args[2]
-            blob_client = self.s3_client.get_blob_client(key)
+            blob_client = self.blob_client.get_blob_client(key)
             blob_client.upload_blob(fileobj, overwrite=True)
 
         def delete_object(*args, **kwargs):
             key = kwargs.get("Key") or args[1]
-            blob_client = self.s3_client.get_blob_client(key)
+            blob_client = self.blob_client.get_blob_client(key)
             blob_client.delete_blob()
 
-        self.s3_client.get_object = get_object
-        self.s3_client.download_fileobj = download_fileobj
-        self.s3_client.upload_fileobj = upload_fileobj
-        self.s3_client.delete_object = delete_object
+        self.blob_client.get_object = get_object
+        self.blob_client.download_fileobj = download_fileobj
+        self.blob_client.upload_fileobj = upload_fileobj
+        self.blob_client.delete_object = delete_object
 
-        logging.info("âœ… Added S3-compatible methods to Azure Blob client for legacy ingestion.")
-
-
-
-        # if self.posthog_api_key:
-        #     self.posthog = Posthog(sync_mode=False, project_api_key=self.posthog_api_key,
-        #                            host='https://app.posthog.com')
-        # else:
-        #     self.posthog = None
-        #     print("POSTHOG API KEY NOT FOUND!")
+        logging.info(" Added blob-compatible methods to Azure Blob client for legacy ingestion.")
 
         self.sql_session = SQLAlchemyIngestDB()
+
+
 
     def main_ingest(self, job_id: str, **inputs: Dict[str | List[str], Any]):
         """
@@ -279,28 +304,35 @@ class Ingest:
             self.initialize_resources()
 
             course_name: List[str] | str = inputs.get('course_name', '')
-            s3_paths: List[str] | str = inputs.get('s3_paths', '')
+            blob_path: List[str] | str = inputs.get('blob_path', '')
             url: List[str] | str | None = inputs.get('url', None)
             base_url: List[str] | str | None = inputs.get('base_url', None)
             readable_filename: List[str] | str = inputs.get('readable_filename', '')
             force_embeddings: bool = inputs.get('force_embeddings', False)  # if content is duplicated, still rescan
 
             content: str | List[str] | None = inputs.get('content', None)  # defined if ingest type is webtext
-            doc_groups: List[str] | str = inputs.get('groups', '')
+            # Normalize document groups to a consistent list format
+            doc_groups = inputs.get('groups') or inputs.get('doc_groups')
+
+            # Ensure doc_groups is always a list
+            if isinstance(doc_groups, str) and doc_groups.strip():
+                doc_groups = [doc_groups]
+            elif not doc_groups:
+                doc_groups = []
 
             print(
-                f"In top of /ingest route. course: {course_name}, s3paths: {s3_paths}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
+                f"In top of /ingest route. course: {course_name}, blobpaths: {blob_path}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
             )
-            success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
+            success_fail_dict = self.run_ingest(course_name, blob_path, base_url, url, readable_filename, content,
                                                 doc_groups, force_embeddings)
             for retry_num in range(1, 3):
                 if isinstance(success_fail_dict, str):  # TODO: What does this indicate?
-                    success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
+                    success_fail_dict = self.run_ingest(course_name, blob_path, base_url, url, readable_filename, content,
                                                         doc_groups,force_embeddings)
                     time.sleep(13 * retry_num)  # max is 65
                 elif success_fail_dict['failure_ingest']:
                     logging.error(f"Ingest failure -- Retry attempt {retry_num}. File: {success_fail_dict}")
-                    success_fail_dict = self.run_ingest(course_name, s3_paths, base_url, url, readable_filename, content,
+                    success_fail_dict = self.run_ingest(course_name, blob_path, base_url, url, readable_filename, content,
                                                         doc_groups,force_embeddings)
                     time.sleep(13 * retry_num)  # max is 65
                 else:
@@ -308,7 +340,7 @@ class Ingest:
             if success_fail_dict['failure_ingest']:
                 logging.error(f"INGEST FAILURE -- About to send to database. success_fail_dict: {success_fail_dict}")
                 self.sql_session.insert_failed_document({
-                    "s3_path": str(s3_paths),
+                    "blob_path": str(blob_path),
                     "readable_filename": readable_filename,
                     "course_name": course_name,
                     "url": url,
@@ -329,31 +361,42 @@ class Ingest:
             success_fail_dict = {"failure_ingest": {'error': str(e)}}
             return json.dumps(success_fail_dict)
 
-    def run_ingest(self, course_name, s3_paths, base_url, url, readable_filename, content, document_groups,
+    def run_ingest(self, course_name, blob_path, base_url, url, readable_filename, content, document_groups,
                    force_embeddings=False):
         """Routes ingest jobs based on the input data -> webscrape, url, readable_filename"""
         if content:
             return self.ingest_single_web_text(course_name, base_url, url, content, readable_filename,
                                                groups=document_groups, force_embeddings=force_embeddings)
         elif readable_filename == '':
-            return self.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url,
+            return self.bulk_ingest(course_name, blob_path, base_url=base_url, url=url,
                                     groups=document_groups, force_embeddings=force_embeddings)
         else:
-            return self.bulk_ingest(course_name, s3_paths, base_url=base_url, url=url,
+            return self.bulk_ingest(course_name, blob_path, base_url=base_url, url=url,
                                     groups=document_groups, readable_filename=readable_filename, force_embeddings=force_embeddings)
 
-    def bulk_ingest(self, course_name: str, s3_paths: Union[str, List[str]],
+    def bulk_ingest(self, course_name: str, blob_path: Union[str, List[str]],
                 force_embeddings: bool, **kwargs) -> Dict[str, None | str | Dict[str, str]]:
-        """Bulk ingest from S3 paths, direct URLs, OR uploaded files into the vectorstore and database."""
+        """Bulk ingest from blob paths, direct URLs, OR uploaded files into the vectorstore and database."""
         print(f"Top of bulk_ingest: ", kwargs)
+        # ✅ Normalize doc_groups early so it propagates correctly
+        doc_groups = kwargs.get('groups') or kwargs.get('doc_groups') or []
+        if isinstance(doc_groups, str) and doc_groups.strip():
+            doc_groups = [doc_groups]
+        kwargs['doc_groups'] = doc_groups
+        kwargs['groups'] = doc_groups  # keep backward compatible
 
-        def _ingest_single(ingest_method: Callable, s3_path: str, course_name: str, force_embeddings: bool, *args, **kwargs):
+
+        def _ingest_single(ingest_method: Callable, blob_path: str, course_name: str, force_embeddings: bool, *args, **kwargs):
             """Handle running an arbitrary ingest function for an individual file."""
-            ret = ingest_method(s3_path, course_name, force_embeddings, *args, **kwargs)
+            ret = ingest_method(blob_path, course_name, force_embeddings, *args, **kwargs)
             if ret == "Success":
-                success_status['success_ingest'] = str(s3_path)
+                success_status['success_ingest'].append(str(blob_path))
             else:
-                success_status['failure_ingest'] = {'s3_path': str(s3_path), 'error': str(ret)}
+                success_status['failure_ingest'].append({
+                    'blob_path': str(blob_path),
+                    'error': str(ret)
+                })
+
 
         file_ingest_methods = {
             '.html': self._ingest_html,
@@ -391,52 +434,56 @@ class Ingest:
             'image': self._ingest_single_image,
         }
 
-        success_status: Dict[str, None | str | Dict[str, str]] = {"success_ingest": None, "failure_ingest": None}
+        success_status = {
+            "success_ingest": [],
+            "failure_ingest": []
+        }
+
         
         try:
-            if isinstance(s3_paths, str):
-                s3_paths = [s3_paths]
+            if isinstance(blob_path, str):
+                blob_path = [blob_path]
 
             # ====== NEW: HANDLE FILE UPLOAD â†’ MinIO ======
             uploaded_file_path = kwargs.get('uploaded_file_path', '')
             
-            if uploaded_file_path and (not s3_paths or s3_paths[0] == ''):
+            if uploaded_file_path and (not blob_path or blob_path[0] == ''):
                 # File was uploaded via form-data, need to save to MinIO first
-                logging.info(f"ðŸ“¤ File upload detected: {uploaded_file_path}")
+                logging.info(f"File upload detected: {uploaded_file_path}")
                 
                 try:
-                    # Generate S3 key with UUID
+                    # Generate blob key with UUID
                     file_extension = Path(uploaded_file_path).suffix
-                    s3_key = f"{course_name}/{uuid.uuid4()}{file_extension}"
+                    blob_key = f"{course_name}/{uuid.uuid4()}{file_extension}"
                     
-                    logging.info(f"ðŸ“¤ Uploading to Azure Blob Storage: {s3_key}")
+                    logging.info(f"Uploading to Azure Blob Storage: {blob_key}")
                     
-                    # Upload to MinIO/S3
+                    # Upload to MinIO/blob
                     with open(uploaded_file_path, 'rb') as file_data:
-                        blob_client = self.s3_client.get_blob_client(s3_key)
+                        blob_client = self.blob_client.get_blob_client(blob_key)
                         blob_client.upload_blob(file_data, overwrite=True)
 
                     
-                    logging.info(f"âœ… Uploaded to Azure Blob: blob://{self.s3_bucket_name}/{s3_key}")
+                    logging.info(f" Uploaded to Azure Blob: blob://{self.blob_container}/{blob_key}")
                     
-                    # Update kwargs with s3_path for downstream processing
-                    kwargs['s3_path'] = s3_key
+                    # Update kwargs with blob_path for downstream processing
+                    kwargs['blob_path'] = blob_key
                     
-                    # Now set s3_paths to process this file through existing S3 flow
-                    s3_paths = [s3_key]
+                    # Now set blob_path to process this file through existing blob flow
+                    blob_path = [blob_key]
                     
                     # Clean up temp file
                     try:
                         os.unlink(uploaded_file_path)
-                        logging.info(f"ðŸ—‘ï¸ Cleaned up temp file: {uploaded_file_path}")
+                        logging.info(f"Cleaned up temp file: {uploaded_file_path}")
                     except Exception as cleanup_error:
-                        logging.warning(f"âš ï¸ Could not delete temp file: {cleanup_error}")
+                        logging.warning(f"Could not delete temp file: {cleanup_error}")
                     
-                    # Continue to S3-based ingestion below with the uploaded file
+                    # Continue to blob-based ingestion below with the uploaded file
                     
                 except Exception as e:
                     err_msg = f"Failed to upload file to MinIO: {str(e)}"
-                    logging.error(f"âŒ {err_msg}")
+                    logging.error(f" {err_msg}")
                     logging.error(traceback.format_exc())
                     success_status['failure_ingest'] = {'file': uploaded_file_path, 'error': err_msg}
                     
@@ -451,15 +498,15 @@ class Ingest:
             # ====== EXISTING: URL-BASED INGESTION ======
             url = kwargs.get('url', '')
             
-            if url and (not s3_paths or s3_paths[0] == ''):
-                # Direct URL ingestion (no S3)
-                logging.info(f"ðŸŒ URL-based ingestion detected: {url}")
+            if url and (not blob_path or blob_path[0] == ''):
+                # Direct URL ingestion (no blob)
+                logging.info(f" URL-based ingestion detected: {url}")
                 
                 try:
                     import requests
                     
                     # Download from URL
-                    logging.info(f"ðŸ“¥ Downloading from URL: {url}")
+                    logging.info(f" Downloading from URL: {url}")
                     response = requests.get(url, timeout=30)
                     response.raise_for_status()
                     
@@ -476,7 +523,7 @@ class Ingest:
                         tmpfile.flush()
                         temp_path = tmpfile.name
                     
-                    logging.info(f"âœ… Downloaded to temp file: {temp_path}")
+                    logging.info(f" Downloaded to temp file: {temp_path}")
                     
                     # Determine ingest method
                     if file_extension in file_ingest_methods:
@@ -486,7 +533,7 @@ class Ingest:
                         ingest_method = self._ingest_single_txt
                     
                     # Call the ingest method with temp file
-                    logging.info(f"ðŸ”§ Processing with method: {ingest_method.__name__}")
+                    logging.info(f" Processing with method: {ingest_method.__name__}")
                     ret = self._ingest_from_local_file(temp_path, course_name, **kwargs)
                     
                     # Cleanup
@@ -497,29 +544,29 @@ class Ingest:
                     
                     if ret == "Success":
                         success_status['success_ingest'] = url
-                        logging.info(f"âœ… Successfully ingested from URL: {url}")
+                        logging.info(f" Successfully ingested from URL: {url}")
                     else:
                         success_status['failure_ingest'] = {'url': url, 'error': str(ret)}
-                        logging.error(f"âŒ Failed to ingest from URL: {url}, error: {ret}")
+                        logging.error(f" Failed to ingest from URL: {url}, error: {ret}")
                     
                     return success_status
                     
                 except Exception as e:
                     err_msg = f"Failed to ingest from URL {url}: {str(e)}"
-                    logging.error(f"âŒ {err_msg}")
+                    logging.error(f" {err_msg}")
                     logging.error(traceback.format_exc())
                     success_status['failure_ingest'] = {'url': url, 'error': err_msg}
                     return success_status
             
-            # ====== EXISTING: S3/MinIO-BASED INGESTION ======
-            for s3_path in s3_paths:
-                logging.info(f"ðŸ“¥ Processing from MinIO/S3: {s3_path}")
+            # ====== EXISTING: INGESTION ======
+            for blob_path in blob_path:
+                logging.info(f" Processing from Blob: {blob_path}")
                 
-                file_extension = Path(s3_path).suffix
+                file_extension = Path(blob_path).suffix
                 
-                # ðŸ”§ CHANGED: Use get_object instead of download_fileobj
+                #  CHANGED: Use get_object instead of download_fileobj
                 with NamedTemporaryFile(suffix=file_extension, delete=False) as tmpfile:
-                    response = self.s3_client.get_object(Bucket=self.s3_bucket_name, Key=s3_path)
+                    response = self.blob_client.get_object(Bucket=self.blob_container, Key=blob_path)
                     tmpfile.write(response['Body'].read())
                     tmpfile.flush()
                     temp_file_path = tmpfile.name
@@ -533,42 +580,42 @@ class Ingest:
                 # Ingest with specialized functions when possible, fallback to mimetype.
                 if file_extension in file_ingest_methods:
                     ingest_method = file_ingest_methods[file_extension]
-                    _ingest_single(ingest_method, s3_path, course_name, force_embeddings, **kwargs)
+                    _ingest_single(ingest_method,blob_path,course_name,force_embeddings,**{**kwargs, "doc_groups": kwargs.get("groups") or kwargs.get("doc_groups", [])})
                 elif mime_category in mimetype_ingest_methods:
                     ingest_method = mimetype_ingest_methods[mime_category]
-                    _ingest_single(ingest_method, s3_path, course_name, force_embeddings, **kwargs)
+                    _ingest_single(ingest_method,blob_path,course_name,force_embeddings,**{**kwargs, "doc_groups": kwargs.get("groups") or kwargs.get("doc_groups", [])})
                 else:
                     # No supported ingest... Fallback to attempting utf-8 decoding, otherwise fail.
                     try:
-                        self._ingest_single_txt(s3_path, course_name, force_embeddings, **kwargs)
-                        success_status['success_ingest'] = s3_path
+                        self._ingest_single_txt(blob_path, course_name, force_embeddings, **kwargs)
+                        success_status['success_ingest'] = blob_path
                     except Exception as e:
-                        err_msg = f"No ingest method for filetype: {file_extension} (with generic type {mime_type}), for file: {s3_path}"
+                        err_msg = f"No ingest method for filetype: {file_extension} (with generic type {mime_type}), for file: {blob_path}"
                         success_status['failure_ingest'] = {
-                            's3_path': s3_path,
+                            'blob_path': blob_path,
                             'error': err_msg
                         }
                         # if self.posthog:
                         #     self.posthog.capture('distinct_id_of_the_user', event='ingest_failure',
                         #         properties={
                         #             'course_name': course_name,
-                        #             's3_path': s3_paths,
+                        #             'blob_path': blob_path,
                         #             'kwargs': kwargs,
                         #             'error': err_msg
                                 # })
             return success_status
             
         except Exception as e:
-            err = f"âŒâŒ Error in /ingest: `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
+            err = f" Error in /ingest: `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
             success_status['failure_ingest'] = {
-                's3_path': s3_path if 's3_path' in locals() else 'unknown',
+                'blob_path': blob_path if 'blob_path' in locals() else 'unknown',
                 'error': f"MAJOR ERROR DURING INGEST: {err}"
             }
             # if self.posthog:
             #     self.posthog.capture('distinct_id_of_the_user', event='ingest_failure',
             #                         properties={
             #                             'course_name': course_name,
-            #                             's3_path': s3_paths,
+            #                             'blob_path': blob_path,
             #                             'kwargs': kwargs,
             #                             'error': err
             #                         })
@@ -582,7 +629,7 @@ class Ingest:
         Loads, chunks, embeds, and uploads to Qdrant
         """
         try:
-            logging.info(f"ðŸ“„ Loading document from: {file_path}")
+            logging.info(f" Loading document from: {file_path}")
             
             # Load document
             loader = TextLoader(file_path, encoding='utf-8')
@@ -591,7 +638,7 @@ class Ingest:
             if not documents:
                 return "Failed: No content extracted"
             
-            logging.info(f"âœ… Loaded {len(documents)} document(s)")
+            logging.info(f" Loaded {len(documents)} document(s)")
             
             # Split into chunks
             text_splitter = RecursiveCharacterTextSplitter(
@@ -601,10 +648,10 @@ class Ingest:
             )
             chunks = text_splitter.split_documents(documents)
             
-            logging.info(f"âœ… Split into {len(chunks)} chunks")
+            logging.info(f" Split into {len(chunks)} chunks")
             
             # Generate embeddings and upload
-            logging.info(f"ðŸ”§ Generating embeddings for {len(chunks)} chunks...")
+            logging.info(f" Generating embeddings for {len(chunks)} chunks...")
             
             points = []
             for i, chunk in enumerate(chunks):
@@ -622,7 +669,7 @@ class Ingest:
                         'readable_filename': kwargs.get('readable_filename', 'Unknown'),
                         'url': kwargs.get('url', ''),
                         'base_url': kwargs.get('base_url', ''),
-                        's3_path': kwargs.get('s3_path', ''),
+                        'blob_path': kwargs.get('blob_path', ''),
                         'pagenumber': '',
                         'doc_groups': kwargs.get('doc_groups', []),
                     }
@@ -632,7 +679,7 @@ class Ingest:
                 if (i + 1) % 10 == 0:
                     logging.info(f"   Generated {i + 1}/{len(chunks)} embeddings")
             
-            logging.info(f"âœ… Generated all {len(points)} embeddings")
+            logging.info(f" Generated all {len(points)} embeddings")
             
             # Upload to Qdrant in batches
             batch_size = self.qdrant_upsert_batch_size
@@ -644,13 +691,13 @@ class Ingest:
                 )
                 logging.info(f"   Uploaded batch {i//batch_size + 1} ({len(batch)} points)")
             
-            logging.info(f"âœ… Successfully uploaded {len(points)} points to Qdrant")
+            logging.info(f" Successfully uploaded {len(points)} points to Qdrant")
             
             return "Success"
             
         except Exception as e:
             err_msg = f"Error in _ingest_from_local_file: {str(e)}"
-            logging.error(f"âŒ {err_msg}")
+            logging.error(f" {err_msg}")
             logging.error(traceback.format_exc())
             return f"Failed: {err_msg}"
 
@@ -660,6 +707,17 @@ class Ingest:
         Takes in Text and Metadata (from Langchain doc loaders) and splits / uploads to Qdrant.
         """
         logging.info(f"Split and upload invoked with {len(texts)} texts and {len(metadatas)} metadatas")
+        # --- PATCH: Normalize doc_groups properly ---
+        if 'doc_groups' in kwargs or 'groups' in kwargs:
+            doc_groups = kwargs.get('doc_groups') or kwargs.get('groups') or []
+            if isinstance(doc_groups, str):
+                doc_groups = [doc_groups] if doc_groups.strip() else []
+            kwargs['doc_groups'] = doc_groups
+            kwargs['groups'] = doc_groups
+        else:
+            kwargs['doc_groups'] = []
+            kwargs['groups'] = []
+
         
         # Add safety check
         if len(texts) > 1000:
@@ -669,7 +727,7 @@ class Ingest:
         #     self.posthog.capture('distinct_id_of_the_user', event='split_and_upload_invoked',
         #                         properties={
         #                             'course_name': metadatas[0].get('course_name', None),
-        #                             's3_path': metadatas[0].get('s3_path', None),
+        #                             'blob_path': metadatas[0].get('blob_path', None),
         #                             'readable_filename': metadatas[0].get('readable_filename', None),
         #                             'url': metadatas[0].get('url', None),
         #                             'base_url': metadatas[0].get('base_url', None),
@@ -689,7 +747,7 @@ class Ingest:
             if len(contexts) > 2000:
                 raise ValueError(f"Too many chunks: {len(contexts)}. Document might be corrupted.")
             
-            logging.info(f"âœ… Created {len(contexts)} chunks from {len(texts)} texts")
+            logging.info(f" Created {len(contexts)} chunks from {len(texts)} texts")
             
             input_texts = [{'input': context.page_content, 'model': self.embedding_model} for context in contexts]
 
@@ -700,24 +758,35 @@ class Ingest:
                     #     self.posthog.capture('distinct_id_of_the_user', event='split_and_upload_succeeded',
                     #                         properties={
                     #                             'course_name': metadatas[0].get('course_name', None),
-                    #                             's3_path': metadatas[0].get('s3_path', None),
+                    #                             'blob_path': metadatas[0].get('blob_path', None),
                     #                             'readable_filename': metadatas[0].get('readable_filename', None),
                     #                             'url': metadatas[0].get('url', None),
                     #                             'base_url': metadatas[0].get('base_url', None),
                     #                             'is_duplicate': True,
                     #                         })
-                    logging.info("âœ… Document is duplicate, skipping")
+                    logging.info(" Document is duplicate, skipping")
                     return "Success"
 
             # adding chunk index to metadata for parent doc retrieval
             for i, context in enumerate(contexts):
                 context.metadata['chunk_index'] = i
-                context.metadata['doc_groups'] = kwargs.get('groups', [])
+
+                # ✅ Normalize doc_groups — handle both keys and fallback to metadatas
+                groups = (
+                    kwargs.get('doc_groups')
+                    or kwargs.get('groups')
+                    or context.metadata.get('doc_groups')
+                    or []
+                )
+                if isinstance(groups, str) and groups.strip():
+                    groups = [groups]
+                context.metadata['doc_groups'] = groups
+
 
             # ============================================================
             # FIXED: Use Azure OpenAI embeddings directly (not OpenAIAPIProcessor)
             # ============================================================
-            logging.info(f"ðŸ”„ Generating embeddings for {len(contexts)} chunks using Azure OpenAI")
+            logging.info(f" Generating embeddings for {len(contexts)} chunks using Azure OpenAI")
             embeddings_start_time = time.monotonic()
             
             try:
@@ -740,13 +809,13 @@ class Ingest:
                     
                     # Small delay between batches to respect rate limits
                     if i + batch_size < len(contexts):
-                        time.sleep(2.0)
+                        time.sleep(5.0)
                 
                 elapsed_time = time.monotonic() - embeddings_start_time
-                logging.info(f"â° Embeddings generated in {elapsed_time:.2f} seconds ({len(embeddings_dict)} embeddings)")
+                logging.info(f" Embeddings generated in {elapsed_time:.2f} seconds ({len(embeddings_dict)} embeddings)")
                 
             except Exception as e:
-                logging.error(f"âŒ Embedding generation failed: {e}")
+                logging.error(f" Embedding generation failed: {e}")
                 logging.error(traceback.format_exc())
                 raise
 
@@ -817,7 +886,7 @@ class Ingest:
             } for context in contexts]
             document = {
                 "course_name": contexts[0].metadata.get('course_name'),
-                "s3_path": contexts[0].metadata.get('s3_path'),
+                "blob_path": contexts[0].metadata.get('blob_path'),
                 "readable_filename": contexts[0].metadata.get('readable_filename'),
                 "url": contexts[0].metadata.get('url'),
                 "base_url": contexts[0].metadata.get('base_url'),
@@ -840,7 +909,7 @@ class Ingest:
             #     self.posthog.capture('distinct_id_of_the_user', event='split_and_upload_succeeded',
             #                         properties={
             #                             'course_name': metadatas[0].get('course_name', None),
-            #                             's3_path': metadatas[0].get('s3_path', None),
+            #                             'blob_path': metadatas[0].get('blob_path', None),
             #                             'readable_filename': metadatas[0].get('readable_filename', None),
             #                             'url': metadatas[0].get('url', None),
             #                             'base_url': metadatas[0].get('base_url', None),
@@ -848,7 +917,7 @@ class Ingest:
             #                         })
             return "Success"
         except Exception as e:
-            err: str = f"ERROR IN split_and_upload(): Traceback: {traceback.extract_tb(e.__traceback__)}âŒâŒ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            err: str = f"ERROR IN split_and_upload(): Traceback: {traceback.extract_tb(e.__traceback__)} Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
             print(err)
             sentry_sdk.capture_exception(e)
             sentry_sdk.flush(timeout=20)
@@ -856,16 +925,16 @@ class Ingest:
 
     def check_for_duplicates(self, texts: List[Dict], metadatas: List[Dict[str, Any]], force_embeddings: bool) -> bool:
         """
-        For given metadata, fetch docs from Supabase based on S3 path or URL.
+        For given metadata, fetch docs from Supabase based on blob path or URL.
         If docs exists, concatenate the texts and compare with current texts, if same, return True.
         """
         course_name = metadatas[0]['course_name']
-        incoming_s3_path = metadatas[0]['s3_path']
+        incoming_blob_path = metadatas[0]['blob_path']
         url = metadatas[0]['url']
 
-        if incoming_s3_path:
-            # Check if uuid (v4) exists in s3_path (not all s3_paths have uuids) and remove if necessary
-            incoming_filename = incoming_s3_path.split('/')[-1]
+        if incoming_blob_path:
+            # Check if uuid (v4) exists in blob_path (not all blob_path have uuids) and remove if necessary
+            incoming_filename = incoming_blob_path.split('/')[-1]
             logging.debug(f"Full filename: {incoming_filename}")
             pattern = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', re.I)
             if bool(pattern.search(incoming_filename)):
@@ -874,10 +943,10 @@ class Ingest:
                 original_filename = incoming_filename
             logging.info(f"Filename after removing uuid: {original_filename}")
 
-            contents = self.sql_session.get_like_docs_by_s3_path(course_name, original_filename)
+            contents = self.sql_session.get_like_docs_by_blob_path(course_name, original_filename)
             contents = contents['data']
             logging.info(
-                f"No. of S3 path based records retrieved: {len(contents)}")  # multiple records can be retrieved: 3.pdf and 453.pdf
+                f"No. of blob path based records retrieved: {len(contents)}")  # multiple records can be retrieved: 3.pdf and 453.pdf
         elif url:
             original_filename = url
             contents = self.sql_session.get_like_docs_by_url(course_name, url)
@@ -891,9 +960,9 @@ class Ingest:
         exact_doc_exists = False
         if len(contents) > 0:  # a doc with same filename exists in SQL
             for record in contents:
-                if incoming_s3_path:
-                    curr_filename = record['s3_path'].split('/')[-1]
-                    older_s3_path = record['s3_path']
+                if incoming_blob_path:
+                    curr_filename = record['blob_path'].split('/')[-1]
+                    older_blob_path = record['blob_path']
                     if bool(pattern.search(curr_filename)):
                         # uuid pattern exists -- remove the uuid and proceed with duplicate checking
                         sql_filename = curr_filename[37:]
@@ -905,7 +974,7 @@ class Ingest:
                 else:
                     continue
 
-                if original_filename == sql_filename:  # compare og s3_path/url with incoming s3_path/url
+                if original_filename == sql_filename:  # compare og blob_path/url with incoming blob_path/url
                     contexts = record
                     exact_doc_exists = True
                     logging.info(f"Exact doc exists in DB: {sql_filename}")
@@ -921,19 +990,19 @@ class Ingest:
                 if db_whole_text == current_whole_text:
                     logging.info(f"Duplicate detected: {original_filename}.")
                     if force_embeddings:
-                        self.delete_vectors(course_name, older_s3_path, url)
+                        self.delete_vectors(course_name, older_blob_path, url)
                     return True
                 else:
                     print(f"Updated file detected: {original_filename}")
                     if force_embeddings:
-                        if incoming_s3_path:
-                            delete_status = self.delete_vectors(course_name, older_s3_path, '')
+                        if incoming_blob_path:
+                            delete_status = self.delete_vectors(course_name, older_blob_path, '')
                         else:
                             delete_status = self.delete_vectors(course_name, '', url)
                     else:
-                        print("older s3_path/url to be deleted: ", sql_filename)
-                        if incoming_s3_path:
-                            delete_status = self.delete_data(course_name, older_s3_path, '')
+                        print("older blob_path/url to be deleted: ", sql_filename)
+                        if incoming_blob_path:
+                            delete_status = self.delete_data(course_name, older_blob_path, '')
                         else:
                             delete_status = self.delete_data(course_name, '', url)
                 return False
@@ -945,17 +1014,17 @@ class Ingest:
             print(f"NOT a duplicate: {original_filename}")
             return False
 
-    def delete_data(self, course_name: str, s3_path: str, source_url: str):
-        """Delete file from S3, Qdrant, and SQL."""
-        logging.info(f"Deleting {s3_path} from S3, Qdrant, and SQL for course {course_name}")
+    def delete_data(self, course_name: str, blob_path: str, source_url: str):
+        """Delete file from blob, Qdrant, and SQL."""
+        logging.info(f"Deleting {blob_path} from blob, Qdrant, and SQL for course {course_name}")
         try:
-            if s3_path:
+            if blob_path:
                 try:
-                    blob_client = self.s3_client.get_blob_client(s3_path)
+                    blob_client = self.blob_client.get_blob_client(blob_path)
                     blob_client.delete_blob()
 
                 except Exception as e:
-                    print("Error in deleting file from s3:", e)
+                    print("Error in deleting file from blob:", e)
                     sentry_sdk.capture_exception(e)
                 # Delete from Qdrant
                 # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
@@ -964,8 +1033,8 @@ class Ingest:
                         collection_name=self.qdrant_collection_name,
                         points_selector=models.Filter(must=[
                             models.FieldCondition(
-                                key="s3_path",
-                                match=models.MatchValue(value=s3_path),
+                                key="blob_path",
+                                match=models.MatchValue(value=blob_path),
                             ),
                         ]),
                     )
@@ -979,7 +1048,7 @@ class Ingest:
                         raise e
 
                 try:
-                    self.sql_session.delete_document_by_s3_path(course_name=course_name, s3_path=s3_path)
+                    self.sql_session.delete_document_by_blob_path(course_name=course_name, blob_path=blob_path)
                 except Exception as e:
                     print("Error in deleting file from database:", e)
                     sentry_sdk.capture_exception(e)
@@ -1012,15 +1081,15 @@ class Ingest:
 
             return "Success"
         except Exception as e:
-            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)}âŒâŒ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)} Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
             sentry_sdk.capture_exception(e)
             return err
 
-    def delete_vectors(self, course_name: str, s3_path: str, source_url: str):
+    def delete_vectors(self, course_name: str, blob_path: str, source_url: str):
         """Delete vector data from Qdrant and SQL."""
-        logging.info(f"Deleting {s3_path} vectors from Qdrant and SQL for course {course_name}")
+        logging.info(f"Deleting {blob_path} vectors from Qdrant and SQL for course {course_name}")
         try:
-            if s3_path:
+            if blob_path:
                 # Delete from Qdrant
                 # docs for nested keys: https://qdrant.tech/documentation/concepts/filtering/#nested-key
                 try:
@@ -1028,8 +1097,8 @@ class Ingest:
                         collection_name=self.qdrant_collection_name,
                         points_selector=models.Filter(must=[
                             models.FieldCondition(
-                                key="s3_path",
-                                match=models.MatchValue(value=s3_path),
+                                key="blob_path",
+                                match=models.MatchValue(value=blob_path),
                             ),
                         ]),
                     )
@@ -1043,7 +1112,7 @@ class Ingest:
                         raise e
 
                 try:
-                    self.sql_session.delete_document_by_s3_path(course_name=course_name, s3_path=s3_path)
+                    self.sql_session.delete_document_by_blob_path(course_name=course_name, blob_path=blob_path)
                 except Exception as e:
                     print("Error in deleting file from database:", e)
                     sentry_sdk.capture_exception(e)
@@ -1076,7 +1145,7 @@ class Ingest:
 
             return "Success"
         except Exception as e:
-            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)}âŒâŒ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            err: str = f"ERROR IN delete_data: Traceback: {traceback.extract_tb(e.__traceback__)} Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
             sentry_sdk.capture_exception(e)
             return err
 
@@ -1096,7 +1165,7 @@ class Ingest:
         try:
             metadatas: List[Dict[str, Any]] = [{
                 'course_name': course_name,
-                's3_path': '',
+                'blob_path': '',
                 'readable_filename': readable_filename,
                 'pagenumber': '',
                 'timestamp': '',
@@ -1117,19 +1186,19 @@ class Ingest:
             success_or_failure['success_ingest'] = url
             return success_or_failure
         except Exception as e:
-            err = f"âŒâŒ Error in (web text ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f" Error in (web text ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )  # type: ignore
             print(err)
             sentry_sdk.capture_exception(e)
             success_or_failure['failure_ingest'] = {'url': url, 'error': str(err)}
             return success_or_failure
 
-    def _ingest_single_py(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs):
+    def _ingest_single_py(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs):
         try:
-            file_name = s3_path.split("/")[-1]
-            file_path = "media/" + file_name  # download from s3 to local folder for ingest
+            file_name = blob_path.split("/")[-1]
+            file_path = "media/" + file_name  # download from blob to local folder for ingest
 
-            self.s3_client.download_file(self.s3_bucket_name, s3_path, file_path)
+            self.blob_client.download_file(self.blob_container, blob_path, file_path)
 
             loader = PythonLoader(file_path)
             documents = loader.load()
@@ -1138,9 +1207,9 @@ class Ingest:
 
             metadatas: List[Dict[str, Any]] = [{
                 'course_name': course_name,
-                's3_path': s3_path,
+                'blob_path': blob_path,
                 'readable_filename': kwargs.get('readable_filename',
-                                                Path(s3_path).name[37:]),
+                                                Path(blob_path).name[37:]),
                 'pagenumber': '',
                 'timestamp': '',
                 'url': kwargs.get('url', ''),
@@ -1154,20 +1223,20 @@ class Ingest:
             return success_or_failure
 
         except Exception as e:
-            err = f"âŒâŒ Error in (Python ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f" Error in (Python ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
             return err
 
-    def _ingest_single_vtt(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs):
+    def _ingest_single_vtt(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs):
         """
-        Ingest a single .vtt file from S3.
+        Ingest a single .vtt file from blob.
         """
         try:
             with NamedTemporaryFile(suffix='.vtt', delete=False) as tmpfile:
-                # download from S3 into vtt_tmpfile
-                blob_client = self.s3_client.get_blob_client(s3_path)
+                # download from blob into vtt_tmpfile
+                blob_client = self.blob_client.get_blob_client(blob_path)
                 data = blob_client.download_blob().readall()
                 tmpfile.write(data)
                 tmpfile.flush()
@@ -1181,9 +1250,9 @@ class Ingest:
 
                 metadatas: List[Dict[str, Any]] = [{
                     'course_name': course_name,
-                    's3_path': s3_path,
+                    'blob_path': blob_path,
                     'readable_filename': kwargs.get('readable_filename',
-                                                    Path(s3_path).name[37:]),
+                                                    Path(blob_path).name[37:]),
                     'pagenumber': '',
                     'timestamp': '',
                     'url': kwargs.get('url', ''),
@@ -1198,19 +1267,19 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"âŒâŒ Error in (VTT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
+            err = f" Error in (VTT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
             print(err)
             sentry_sdk.capture_exception(e)
             return err
 
-    def _ingest_html(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
-        print(f"IN _ingest_html s3_path `{s3_path}` kwargs: {kwargs}")
+    def _ingest_html(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
+        print(f"IN _ingest_html blob_path `{blob_path}` kwargs: {kwargs}")
         try:
-            response = self.s3_client.get_object(Bucket=self.s3_bucket_name, Key=s3_path)
+            response = self.blob_client.get_object(Bucket=self.blob_container, Key=blob_path)
             raw_html = response['Body'].read().decode('utf-8', errors='ignore')
 
             soup = BeautifulSoup(raw_html, 'html.parser')
-            title = s3_path.replace("courses/" + course_name, "")
+            title = blob_path.replace("courses/" + course_name, "")
             title = title.replace(".html", "")
             title = title.replace("_", " ")
             title = title.replace("/", " ")
@@ -1220,7 +1289,7 @@ class Ingest:
 
             metadata: List[Dict[str, Any]] = [{
                 'course_name': course_name,
-                's3_path': s3_path,
+                'blob_path': blob_path,
                 'readable_filename': str(title),  # adding str to avoid error: unhashable type 'slice'
                 'url': kwargs.get('url', ''),
                 'base_url': kwargs.get('base_url', ''),
@@ -1232,14 +1301,14 @@ class Ingest:
             print(f"_ingest_html: {success_or_failure}")
             return success_or_failure
         except Exception as e:
-            err: str = f"ERROR IN _ingest_html: {e}\nTraceback: {traceback.extract_tb(e.__traceback__)}âŒâŒ Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
+            err: str = f"ERROR IN _ingest_html: {e}\nTraceback: {traceback.extract_tb(e.__traceback__)} Error in {inspect.currentframe().f_code.co_name}:{e}"  # type: ignore
             print(err)
             sentry_sdk.capture_exception(e)
             return err
 
-    def _ingest_single_video(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
+    def _ingest_single_video(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         """
-        Ingest a single video file from S3.
+        Ingest a single video file from blob.
         """
         print("Starting ingest video or audio")
         try:
@@ -1249,12 +1318,12 @@ class Ingest:
                 os.makedirs(media_dir)
 
             # check for file extension
-            file_ext = Path(s3_path).suffix
+            file_ext = Path(blob_path).suffix
             openai.api_key = os.getenv('OPENAI_API_KEY')
             transcript_list = []
             with NamedTemporaryFile(suffix=file_ext, delete=False) as video_tmpfile:
-                # download from S3 into an video tmpfile
-                self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=video_tmpfile)
+                # download from blob into an video tmpfile
+                self.blob_client.download_fileobj(Bucket=self.blob_container, Key=blob_path, Fileobj=video_tmpfile)
                 video_tmpfile.flush()
                 temp_path = video_tmpfile.name
 
@@ -1319,25 +1388,28 @@ class Ingest:
                             split_tmp_path = split_tmp.name
 
                         # transcribe the split file and store the text in dictionary
-                        with open(split_tmp_path, "rb") as f:
-                            transcript = openai.Audio.transcribe("whisper-1", f)
-                            transcript_list.append(transcript['text'])  # type: ignore
-                        
+                        transcript = self.whisper_client.audio.transcriptions.create(
+                            model=self.whisper_deployment,
+                            file=f
+                        )
+                        transcript_list.append(transcript.text) 
+                                                
                         # Clean up split file
                         try:
                             os.remove(split_tmp_path)
                         except:
                             pass
-                            
+                        
                         start += split_segment
                         split_segment += split_segment
                         count += 1
                 else:
-                    # transcribe the full audio
                     with open(webm_temp_path, "rb") as f:
-                        transcript = openai.Audio.transcribe("whisper-1", f)
-                        transcript_list.append(transcript['text'])  # type: ignore
-
+                        transcript = self.whisper_client.audio.transcriptions.create(
+                        model=self.whisper_deployment,
+                        file=f
+                    )
+                    transcript_list.append(transcript.text) 
                 # Clean up webm file
                 try:
                     os.remove(webm_temp_path)
@@ -1347,9 +1419,9 @@ class Ingest:
                 text = [txt for txt in transcript_list]
                 metadatas: List[Dict[str, Any]] = [{
                     'course_name': course_name,
-                    's3_path': s3_path,
+                    'blob_path': blob_path,
                     'readable_filename': kwargs.get('readable_filename',
-                                                    Path(s3_path).name[37:]),
+                                                    Path(blob_path).name[37:]),
                     'pagenumber': '',
                     'timestamp': text.index(txt),
                     'url': kwargs.get('url', ''),
@@ -1366,16 +1438,16 @@ class Ingest:
                     pass
                     
         except Exception as e:
-            err = f"âŒâŒ Error in (VIDEO ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f" Error in (VIDEO ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_docx(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
+    def _ingest_single_docx(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
             with NamedTemporaryFile(suffix='.docx', delete=False) as tmpfile:
-                blob_client = self.s3_client.get_blob_client(s3_path)
+                blob_client = self.blob_client.get_blob_client(blob_path)
                 data = blob_client.download_blob().readall()
                 tmpfile.write(data)
                 tmpfile.flush()
@@ -1390,9 +1462,9 @@ class Ingest:
                 texts = [doc.page_content for doc in documents]
                 metadatas: List[Dict[str, Any]] = [{
                     'course_name': course_name,
-                    's3_path': s3_path,
+                    'blob_path': blob_path,
                     'readable_filename': kwargs.get('readable_filename',
-                                                    Path(s3_path).name[37:]),
+                                                    Path(blob_path).name[37:]),
                     'pagenumber': '',
                     'timestamp': '',
                     'url': kwargs.get('url', ''),
@@ -1407,18 +1479,18 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"âŒâŒ Error in (DOCX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f" Error in (DOCX ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_srt(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
+    def _ingest_single_srt(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
             import pysrt
 
             # NOTE: slightly different method for .txt files, no need for download. It's part of the 'body'
-            response = self.s3_client.get_object(Bucket=self.s3_bucket_name, Key=s3_path)
+            response = self.blob_client.get_object(Bucket=self.blob_container, Key=blob_path)
             raw_text = response['Body'].read().decode('utf-8', errors='ignore')
 
             print("UTF-8 text to ingest as SRT:", raw_text)
@@ -1429,9 +1501,9 @@ class Ingest:
             texts = [text]
             metadatas: List[Dict[str, Any]] = [{
                 'course_name': course_name,
-                's3_path': s3_path,
+                'blob_path': blob_path,
                 'readable_filename': kwargs.get('readable_filename',
-                                                Path(s3_path).name[37:]),
+                                                Path(blob_path).name[37:]),
                 'pagenumber': '',
                 'timestamp': '',
                 'url': kwargs.get('url', ''),
@@ -1443,18 +1515,18 @@ class Ingest:
             self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
             return "Success"
         except Exception as e:
-            err = f"âŒâŒ Error in (SRT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f" Error in (SRT ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_excel(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
+    def _ingest_single_excel(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
-            file_ext = Path(s3_path).suffix
+            file_ext = Path(blob_path).suffix
             with NamedTemporaryFile(suffix=file_ext, delete=False) as tmpfile:
-                # download from S3 into tmpfile
-                blob_client = self.s3_client.get_blob_client(s3_path)
+                # download from blob into tmpfile
+                blob_client = self.blob_client.get_blob_client(blob_path)
                 data = blob_client.download_blob().readall()
                 tmpfile.write(data)
                 tmpfile.flush()
@@ -1469,9 +1541,9 @@ class Ingest:
                 texts = [doc.page_content for doc in documents]
                 metadatas: List[Dict[str, Any]] = [{
                     'course_name': course_name,
-                    's3_path': s3_path,
+                    'blob_path': blob_path,
                     'readable_filename': kwargs.get('readable_filename',
-                                                    Path(s3_path).name[37:]),
+                                                    Path(blob_path).name[37:]),
                     'pagenumber': '',
                     'timestamp': '',
                     'url': kwargs.get('url', ''),
@@ -1486,18 +1558,24 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"âŒâŒ Error in (Excel/xlsx ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f" Error in (Excel/xlsx ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_image(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
+    def _ingest_single_image(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
-            readable_filename = kwargs.get('readable_filename', Path(s3_path).name[37:])
-            with NamedTemporaryFile(suffix="."+readable_filename.split(".")[-1], delete=False) as tmpfile:
-                # download from S3 into tmpfile
-                blob_client = self.s3_client.get_blob_client(s3_path)
+            readable_filename = kwargs.get('readable_filename')
+            if not readable_filename:
+                readable_filename = Path(blob_path).name
+                if len(readable_filename) > 37 and readable_filename[36] == '_':
+                    readable_filename = readable_filename[37:]
+            
+            file_extension = Path(readable_filename).suffix or '.png'
+            with NamedTemporaryFile(suffix=file_extension, delete=False) as tmpfile:
+                # download from blob into tmpfile
+                blob_client = self.blob_client.get_blob_client(blob_path)
                 data = blob_client.download_blob().readall()
                 tmpfile.write(data)
                 tmpfile.flush()
@@ -1513,14 +1591,19 @@ class Ingest:
                 documents = loader.load()
                 """
 
-                res_str = pytesseract.image_to_string(Image.open(temp_path))
+                doc_groups = kwargs.get('doc_groups', [])
+                lang_code = self.get_tesseract_lang_from_docgroups(doc_groups)
+
+                res_str = pytesseract.image_to_string(Image.open(temp_path), lang=lang_code)
+                logging.info(f"🧠 Using OCR language '{lang_code}' for doc_groups={doc_groups}")
+
                 print("IMAGE PARSING RESULT:", res_str)
                 documents = [Document(page_content=res_str)]
 
                 texts = [doc.page_content for doc in documents]
                 metadatas: List[Dict[str, Any]] = [{
                     'course_name': course_name,
-                    's3_path': s3_path,
+                    'blob_path': blob_path,
                     'readable_filename': readable_filename,
                     'pagenumber': '',
                     'timestamp': '',
@@ -1536,17 +1619,17 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"âŒâŒ Error in (png/jpg ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f" Error in (png/jpg ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_csv(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
+    def _ingest_single_csv(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         try:
             with NamedTemporaryFile(suffix='.csv', delete=False) as tmpfile:
-                # download from S3 into tmpfile
-                blob_client = self.s3_client.get_blob_client(s3_path)
+                # download from blob into tmpfile
+                blob_client = self.blob_client.get_blob_client(blob_path)
                 data = blob_client.download_blob().readall()
                 tmpfile.write(data)
                 tmpfile.flush()
@@ -1561,9 +1644,9 @@ class Ingest:
                 texts = [doc.page_content for doc in documents]
                 metadatas: List[Dict[str, Any]] = [{
                     'course_name': course_name,
-                    's3_path': s3_path,
+                    'blob_path': blob_path,
                     'readable_filename': kwargs.get('readable_filename',
-                                                    Path(s3_path).name[37:]),
+                                                    Path(blob_path).name[37:]),
                     'pagenumber': '',
                     'timestamp': '',
                     'url': kwargs.get('url', ''),
@@ -1578,23 +1661,31 @@ class Ingest:
                 except:
                     pass
         except Exception as e:
-            err = f"âŒâŒ Error in (CSV ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
+            err = f" Error in (CSV ingest): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc(
             )
             print(err)
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_pdf(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs):
+    def _ingest_single_pdf(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs):
         """
-        Ingests a single PDF file from MinIO/S3 into Qdrant (and optionally Supabase).
+        Ingests a single PDF file from MinIO/blob into Qdrant (and optionally Supabase).
         Now Windows-safe (avoids temp file permission issues).
         """
+
+        # NEW LOGIC ADDED
+        doc_groups = kwargs.get("doc_groups", []) or kwargs.get("groups", [])
+        lang = self.get_tesseract_lang_from_docgroups(doc_groups)
+
+        # Force OCR for Indian languages (Marathi, Hindi, Punjabi, Tamil, Telugu, Gujarati)
+        force_ocr = lang in ["mar", "hin", "pan", "tam", "tel", "guj"]
+
         try:
-            readable_filename = kwargs.get('readable_filename', Path(s3_path).name[37:])
-            
-            # --- Step 1: Download PDF from S3 ---
+            readable_filename = kwargs.get('readable_filename', Path(blob_path).name[37:])
+
+            # --- Step 1: Download PDF from blob ---
             with NamedTemporaryFile(suffix='.pdf', delete=False) as tmpfile:
-                blob_client = self.s3_client.get_blob_client(s3_path)
+                blob_client = self.blob_client.get_blob_client(blob_path)
                 data = blob_client.download_blob().readall()
                 tmpfile.write(data)
                 tmpfile.flush()
@@ -1607,11 +1698,20 @@ class Ingest:
                 pdf_pages = []
                 with fitz.open(tmp_pdf_path) as pdf_document:
                     num_pages = pdf_document.page_count
-                    print(f"Processing '{s3_path}' with {num_pages} pages")
+                    print(f"Processing '{blob_path}' with {num_pages} pages")
 
                     # Process each page
                     for i, page in enumerate(pdf_document):
-                        text = page.get_text("text")
+
+                        # *********** NEW: force OCR branch ***********
+                        if force_ocr:
+                            pix = page.get_pixmap(dpi=300)
+                            img_bytes = pix.tobytes("png")
+                            img = Image.open(io.BytesIO(img_bytes))
+                            text = pytesseract.image_to_string(img, lang=lang)
+                        else:
+                            text = page.get_text("text")
+
                         if text.strip():
                             pdf_pages.append({
                                 'text': text,
@@ -1622,36 +1722,35 @@ class Ingest:
                         # --- Step 3: Upload first page thumbnail ---
                         if i == 0:
                             tmp_png_path = os.path.join(
-                                os.path.dirname(tmp_pdf_path), f"{Path(s3_path).stem}_thumb.png"
+                                os.path.dirname(tmp_pdf_path), f"{Path(blob_path).stem}_thumb.png"
                             )
                             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # high-res thumbnail
                             pix.save(tmp_png_path)
 
-                            s3_upload_path = (
-                                str(Path(s3_path)).rsplit(".pdf")[0] + "-pg1-thumb.png"
+                            blob_upload_path = (
+                                str(Path(blob_path)).rsplit(".pdf")[0] + "-pg1-thumb.png"
                             )
 
                             with open(tmp_png_path, "rb") as f_png:
-                                print("ðŸ“¤ Uploading first-page thumbnail to MinIO...")
-                                blob_client = self.s3_client.get_blob_client(s3_upload_path)
+                                print("Uploading first-page thumbnail to MinIO...")
+                                blob_client = self.blob_client.get_blob_client(blob_upload_path)
                                 blob_client.upload_blob(f_png, overwrite=True)
-
 
                             try:
                                 os.remove(tmp_png_path)
                             except:
                                 pass
 
-                # Check if we got any text
-                if not pdf_pages:
+                # If NOTHING extracted (English case only)
+                if not pdf_pages and not force_ocr:
                     print("No text found in PDF, attempting OCR...")
-                    return self._ocr_pdf(s3_path, course_name, force_embeddings, **kwargs)
+                    return self._ocr_pdf(blob_path, course_name, force_embeddings, **kwargs)
 
                 # --- Step 4: Split and upload ---
                 texts = [page['text'] for page in pdf_pages]
                 metadatas: List[Dict[str, Any]] = [{
                     'course_name': course_name,
-                    's3_path': s3_path,
+                    'blob_path': blob_path,
                     'readable_filename': readable_filename,
                     'pagenumber': page['page_number'],
                     'timestamp': '',
@@ -1660,8 +1759,8 @@ class Ingest:
                 } for page in pdf_pages]
 
                 self.split_and_upload(texts=texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
-                
-                print(f"Successfully ingested: {s3_path}")
+
+                print(f"Successfully ingested: {blob_path}")
                 return "Success"
 
             finally:
@@ -1677,20 +1776,18 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ocr_pdf(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs):
-        # if self.posthog:
-        #     self.posthog.capture('distinct_id_of_the_user',
-        #                          event='ocr_pdf_invoked',
-        #                          properties={
-        #                              'course_name': course_name,
-        #                              's3_path': s3_path,
-        #                          })
 
+
+    def _ocr_pdf(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs):
+        """
+        FULL OCR fallback for English PDFs or corrupted PDFs.
+        Used only when forced OCR is not triggered inside _ingest_single_pdf.
+        """
         pdf_pages_OCRed: List[Dict] = []
+
         try:
             with NamedTemporaryFile(suffix='.pdf', delete=False) as pdf_tmpfile:
-                # download from S3 into pdf_tmpfile
-                self.s3_client.download_fileobj(Bucket=self.s3_bucket_name, Key=s3_path, Fileobj=pdf_tmpfile)
+                self.blob_client.download_fileobj(Bucket=self.blob_container, Key=blob_path, Fileobj=pdf_tmpfile)
                 pdf_tmpfile.flush()
                 temp_path = pdf_tmpfile.name
 
@@ -1698,15 +1795,22 @@ class Ingest:
                 with pdfplumber.open(temp_path) as pdf:
                     for i, page in enumerate(pdf.pages):
                         im = page.to_image()
-                        text = pytesseract.image_to_string(im.original)
+                        doc_groups = kwargs.get('doc_groups', [])
+                        lang_code = self.get_tesseract_lang_from_docgroups(doc_groups)
+
+                        # OCR
+                        text = pytesseract.image_to_string(im.original, lang=lang_code)
+                        logging.info(f"OCR language '{lang_code}' for doc_groups={doc_groups}")
+
                         print("Page number: ", i, "Text: ", text[:100])
                         pdf_pages_OCRed.append(
-                            dict(text=text, page_number=i, readable_filename=Path(s3_path).name[37:]))
+                            dict(text=text, page_number=i, readable_filename=Path(blob_path).name[37:])
+                        )
 
                 metadatas: List[Dict[str, Any]] = [
                     {
                         'course_name': course_name,
-                        's3_path': s3_path,
+                        'blob_path': blob_path,
                         'pagenumber': page['page_number'] + 1,  # +1 for human indexing
                         'timestamp': '',
                         'readable_filename': kwargs.get('readable_filename', page['readable_filename']),
@@ -1714,38 +1818,35 @@ class Ingest:
                         'base_url': kwargs.get('base_url', ''),
                     } for page in pdf_pages_OCRed
                 ]
+
                 pdf_texts = [page['text'] for page in pdf_pages_OCRed]
-                
-                # if self.posthog:
-                #     self.posthog.capture('distinct_id_of_the_user',
-                #                          event='ocr_pdf_succeeded',
-                #                          properties={
-                #                              'course_name': course_name,
-                #                              's3_path': s3_path,
-                #                          })
 
                 has_words = any(text.strip() for text in pdf_texts)
                 if not has_words:
-                    raise ValueError(
-                        "Failed ingest: Could not detect ANY text in the PDF. OCR did not help. PDF appears empty of text.")
+                    raise ValueError("Failed ingest: No readable text found after OCR.")
 
-                success_or_failure = self.split_and_upload(texts=pdf_texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs)
+                success_or_failure = self.split_and_upload(
+                    texts=pdf_texts, metadatas=metadatas, force_embeddings=force_embeddings, **kwargs
+                )
                 return success_or_failure
+
             finally:
                 try:
                     os.remove(temp_path)
                 except:
                     pass
+
         except Exception as e:
-            err = f"Error in PDF ingest (with OCR): `{inspect.currentframe().f_code.co_name}`: {e}\nTraceback:\n", traceback.format_exc()
+            err = f"Error in PDF ingest (with OCR): `_ocr_pdf`: {e}\nTraceback:\n", traceback.format_exc()
             print(err)
             sentry_sdk.capture_exception(e)
             return err
 
-    def _ingest_single_txt(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
-        """Ingest a single .txt or .md file from S3.
+
+    def _ingest_single_txt(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
+        """Ingest a single .txt or .md file from blob.
         Args:
-            s3_path (str): A path to a .txt file in S3
+            blob_path (str): A path to a .txt file in blob
             course_name (str): The name of the course
         Returns:
             str: "Success" or an error message
@@ -1754,18 +1855,18 @@ class Ingest:
         print("kwargs", kwargs)
         try:
             # NOTE: slightly different method for .txt files, no need for download. It's part of the 'body'
-            blob_client = self.s3_client.get_blob_client(s3_path)
+            blob_client = self.blob_client.get_blob_client(blob_path)
             response = blob_client.download_blob().readall()
 
-            text = response['Body'].read().decode('utf-8', errors='ignore')
-            print("UTF-8 text to ingest (from s3)", text)
+            text = response.decode('utf-8', errors='ignore')
+            print("UTF-8 text to ingest (from blob)", text)
             text = [text]
 
             metadatas: List[Dict[str, Any]] = [{
                 'course_name': course_name,
-                's3_path': s3_path,
+                'blob_path': blob_path,
                 'readable_filename': kwargs.get('readable_filename',
-                                                Path(s3_path).name[37:]),
+                                                Path(blob_path).name[37:]),
                 'pagenumber': '',
                 'timestamp': '',
                 'url': kwargs.get('url', ''),
@@ -1782,15 +1883,15 @@ class Ingest:
             sentry_sdk.capture_exception(e)
             return str(err)
 
-    def _ingest_single_ppt(self, s3_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
+    def _ingest_single_ppt(self, blob_path: str, course_name: str, force_embeddings: bool, **kwargs) -> str:
         """
-        Ingest a single .ppt or .pptx file from S3.
+        Ingest a single .ppt or .pptx file from blob.
         """
         try:
-            file_ext = Path(s3_path).suffix
+            file_ext = Path(blob_path).suffix
             with NamedTemporaryFile(suffix=file_ext, delete=False) as tmpfile:
-                # download from S3 into tmpfile
-                blob_client = self.s3_client.get_blob_client(s3_path)
+                # download from blob into tmpfile
+                blob_client = self.blob_client.get_blob_client(blob_path)
                 data = blob_client.download_blob().readall()
                 tmpfile.write(data)
                 tmpfile.flush()
@@ -1805,9 +1906,9 @@ class Ingest:
                 texts = [doc.page_content for doc in documents]
                 metadatas: List[Dict[str, Any]] = [{
                     'course_name': course_name,
-                    's3_path': s3_path,
+                    'blob_path': blob_path,
                     'readable_filename': kwargs.get('readable_filename',
-                                                    Path(s3_path).name[37:]),
+                                                    Path(blob_path).name[37:]),
                     'pagenumber': '',
                     'timestamp': '',
                     'url': kwargs.get('url', ''),
@@ -1855,7 +1956,7 @@ class Ingest:
                 texts = doc.page_content
                 metadatas: Dict[str, Any] = {
                     'course_name': course_name,
-                    's3_path': '',
+                    'blob_path': '',
                     'readable_filename': doc.metadata['file_name'],
                     'url': f"{github_url}/blob/main/{doc.metadata['file_path']}",
                     'pagenumber': '',
