@@ -92,7 +92,7 @@ def ingest() -> Response:
 
                 # Backward-compatible group forwarding
                 "doc_groups": doc_groups,
-                "groups": doc_groups,
+                "language": doc_groups,
 
                 # Optional flags/fields
                 "force_embeddings": force_embeddings,
@@ -140,8 +140,8 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
         elif not isinstance(doc_groups, list):
             doc_groups = []
 
-        if not question or not course_name:
-            abort(400, description="Missing required parameters: 'question' and 'course_name'")
+        if not question :
+            abort(400, description="Missing required parameters: 'question' ")
 
         logging.info(f"Chat request | Course: {course_name} | Groups: {doc_groups} | Question: {question[:80]}...")
 

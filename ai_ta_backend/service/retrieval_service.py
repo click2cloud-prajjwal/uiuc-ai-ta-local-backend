@@ -112,11 +112,23 @@ class RetrievalService:
         search_results = []
 
         try:
+            # Combine course filter + conversation filter
+            if course_name and course_name.strip():
+                allowed_courses = [course_name, "Global"]
+            else:
+                # User selected nothing -> only search global
+                allowed_courses = ["Global"]
+
+            regular_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="course_name",
+                        match=models.MatchAny(any=allowed_courses)
+                    )
+                ]
+            )
             if conversation_id:
-                # Combine course filter + conversation filter
-                regular_filter = self.vdb._create_search_filter(
-                    course_name, doc_groups, [], []
-                )
+
                 convo_filter = self._create_conversation_filter(conversation_id)
                 combined_filter = models.Filter(should=[regular_filter, convo_filter])
 
@@ -132,7 +144,7 @@ class RetrievalService:
                 )
 
             else:
-                search_results = self.vdb.vector_search(
+                search_results = self.vdb.vector_search_with_filter(
                     search_query,
                     course_name,
                     doc_groups,
@@ -140,7 +152,9 @@ class RetrievalService:
                     top_n,
                     [],
                     [],
+                    regular_filter,   # USE THE SAME FILTER FROM ABOVE
                 )
+
 
         except Exception as e:
             logging.error(f"❌ Vector search failed: {e}")
