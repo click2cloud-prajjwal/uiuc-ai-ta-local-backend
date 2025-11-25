@@ -227,7 +227,7 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
             logging.warning(f"Failed to store conversation: {e}")
 
         response = jsonify({
-            "answer": result["answer"],
+            "final_response": result["answer"],
             "contexts": contexts,
             "sources_used": result["sources_used"],
             "model": result["model"],
