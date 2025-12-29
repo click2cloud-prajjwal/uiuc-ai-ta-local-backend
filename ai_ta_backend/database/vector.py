@@ -62,8 +62,7 @@ class VectorDatabase:
             embeddings=AzureOpenAIEmbeddings(
                 azure_deployment=os.environ["EMBEDDING_MODEL"],
                 azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-                api_key=os.environ["AZURE_OPENAI_KEY"],
-                api_version=os.environ.get("OPENAI_API_VERSION", "2023-05-15"),
+                api_key=os.environ["AZURE_OPENAI_API_KEY"],
                 chunk_size=1
             )
         )

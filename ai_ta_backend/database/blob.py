@@ -11,21 +11,20 @@ from datetime import datetime, timedelta
 class BlobStorage:
     def __init__(self):
         # Get environment variables
-        account_name = os.getenv("AZURE_SA_NAME")
-        account_key = os.getenv("AZURE_SA_ACCESSKEY")
-        connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+        self.account_name = os.getenv("AZURE_SA_NAME")
+        self.account_key = os.getenv("AZURE_SA_ACCESSKEY")
         self.container_name = os.getenv("AZURE_STORAGE_CONTAINER", "uiuc-chatbot")
 
-        # If connection string not provided, build it manually
-        if not connection_string and account_name and account_key:
+        connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+
+        if not connection_string:
             connection_string = (
                 f"DefaultEndpointsProtocol=https;"
-                f"AccountName={account_name};"
-                f"AccountKey={account_key};"
+                f"AccountName={self.account_name};"
+                f"AccountKey={self.account_key};"
                 f"EndpointSuffix=core.windows.net"
             )
 
-        # Connect to Azure Blob
         self.client = BlobServiceClient.from_connection_string(connection_string)
         self.container_client = self.client.get_container_client(self.container_name)
 
@@ -50,7 +49,10 @@ class BlobStorage:
                 print(f"Updated container access policy → public (blob)")
         except Exception as e:
             print(f"Could not verify/update container access policy: {e}")
-
+            
+    def get_blob_url(self, blob_key: str) -> str:
+        return f"https://{self.account_name}.blob.core.windows.net/{self.container_name}/{blob_key}"
+        
     def upload_file(self, file_path: str, blob_name: str):
         """Upload local file to Azure Blob"""
         with open(file_path, "rb") as data:

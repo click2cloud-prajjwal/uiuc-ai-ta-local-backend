@@ -45,7 +45,6 @@ pdfplumber==0.11.0
 aio-pika==9.0.5
 
 # AI & core services
-nomic==3.4.1
 openai==1.63.0
 langchain==0.3.18
 langchainhub==0.1.21
@@ -54,20 +53,11 @@ langchain_qdrant==0.2.0
 langchain_neo4j==0.4.0
 langchain_community==0.3.16
 langgraph==0.2.69
-canvasapi==3.2.0
+
 
 # Data
-boto3==1.36.20
 qdrant-client==1.13.2
-supabase==2.13.0
-minio==7.2.15
-redis[hiredis]==5.2.1
 
-# Logging 
-posthog==3.13.0
-sentry-sdk==2.21.0
-
-ollama==0.4.7
 
 # File processing libraries for chat uploads
 PyMuPDF==1.23.6
@@ -80,38 +70,7 @@ beautifulsoup4==4.12.2 # HTML parsing
 pysrt==1.1.2 # SRT subtitle files
 Pillow==10.0.0 # Image processing for OCR
 docx2txt==0.8 # Alternative DOCX processing
-# Not currently supporting coursera ingest
-# cs-dlp @ git+https://github.com/raffaem/cs-dlp.git@0.12.0b0 # previously called coursera-dl
-
-# removed due to /ingest in Beam
-# canvasapi
-# GitPython
-# pysrt
-# docx2txt
-# pydub
-# ffmpeg-python
-# ffprobe
-# ffmpeg
-# beautifulsoup4
-# PyMuPDF
-# pytesseract # image OCR
-# openpyxl # excel
-# networkx # unused part of excel partitioning :(
-# python-pptx
-# unstructured # causes huge ~5.3 GB of installs. Probbably from onnx: https://github.com/Unstructured-IO/unstructured/blob/ad14321016533dc03c1782f6ebea00bc9c804846/requirements/extra-pdf-image.in#L4
-
-# pdf packages for unstructured
-# pdf2image
-# pdfminer.six
-# opencv-python-headless
-# unstructured.pytesseract
-# unstructured-inference # this is the real large one :(
-# unstructured[xlsx,image,pptx] # causes huge ~5.3 GB of installs. Probbably from onnx: https://github.com/Unstructured-IO/unstructured/blob/ad14321016533dc03c1782f6ebea00bc9c804846/requirements/extra-pdf-image.in#L4
-
+# added
 azure-storage-blob
-chromadb
 pyodbc
-sqlalchemy
 
-deep-translator==1.11.4
-langdetect
