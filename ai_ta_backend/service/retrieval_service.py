@@ -8,8 +8,10 @@ from injector import inject
 
 from langchain.schema import Document
 from langchain_community.embeddings import AzureOpenAIEmbeddings
+from langchain_community.embeddings import AzureOpenAIEmbeddings
 from qdrant_client.http import models
 
+from database.blob import BlobStorage
 from database.blob import BlobStorage
 from database.sql import SQLDatabase
 from database.vector import VectorDatabase
@@ -43,6 +45,14 @@ class RetrievalService:
             chunk_size=1000,
         )
         logging.info("✅ Using Azure OpenAI embeddings")
+        # Azure OpenAI Embeddings 
+        self.embeddings = AzureOpenAIEmbeddings(
+            azure_deployment=os.environ["EMBEDDING_MODEL"],
+            openai_api_key=os.environ["AZURE_OPENAI_API_KEY"],
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            chunk_size=1000,
+        )
+        logging.info("✅ Using Azure OpenAI embeddings")
 
     # ---------------------------------------------------------------------
     # 🔍 MAIN RETRIEVAL FUNCTION
@@ -56,18 +66,23 @@ class RetrievalService:
         conversation_id: str = "",
     ) -> Union[List[Dict], str]:
 
+
         if doc_groups is None:
             doc_groups = []
+
 
         try:
             start_time = time.monotonic()
             logging.info(f"🔍 Retrieving contexts for course: {course_name}")
 
             # Compute query embedding (CLEAN)
+            # Compute query embedding (CLEAN)
             user_query_embedding = self._embed_query_and_measure_latency(
+                search_query, self.embeddings
                 search_query, self.embeddings
             )
 
+            # Vector search
             # Vector search
             found_docs = self.vector_search(
                 search_query=search_query,
@@ -127,7 +142,23 @@ class RetrievalService:
                     )
                 ]
             )
+            # Combine course filter + conversation filter
+            if course_name and course_name.strip():
+                allowed_courses = [course_name, "Global"]
+            else:
+                # User selected nothing -> only search global
+                allowed_courses = ["Global"]
+
+            regular_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="course_name",
+                        match=models.MatchAny(any=allowed_courses)
+                    )
+                ]
+            )
             if conversation_id:
+
 
                 convo_filter = self._create_conversation_filter(conversation_id)
                 combined_filter = models.Filter(should=[regular_filter, convo_filter])
@@ -143,7 +174,9 @@ class RetrievalService:
                     combined_filter,
                 )
 
+
             else:
+                search_results = self.vdb.vector_search_with_filter(
                 search_results = self.vdb.vector_search_with_filter(
                     search_query,
                     course_name,
@@ -153,33 +186,45 @@ class RetrievalService:
                     [],
                     [],
                     regular_filter,   # USE THE SAME FILTER FROM ABOVE
+                    regular_filter,   # USE THE SAME FILTER FROM ABOVE
                 )
+
 
 
         except Exception as e:
             logging.error(f"❌ Vector search failed: {e}")
 
         # Measure Qdrant latency
+        # Measure Qdrant latency
         self.qdrant_latency_sec = time.monotonic() - start_time
 
+        # Process results
+        return self._process_search_results(search_results, course_name)
         # Process results
         return self._process_search_results(search_results, course_name)
 
     # ---------------------------------------------------------------------
     # 🧠 EMBEDDINGS 
+    # 🧠 EMBEDDINGS 
     # ---------------------------------------------------------------------
+    def _embed_query_and_measure_latency(self, search_query, embedding_client, *_):
+        """Embed query WITHOUT Qwen logic, WITHOUT embedding_model."""
     def _embed_query_and_measure_latency(self, search_query, embedding_client, *_):
         """Embed query WITHOUT Qwen logic, WITHOUT embedding_model."""
         openai_start_time = time.monotonic()
 
         text_to_embed = search_query  # Direct query text
 
+        text_to_embed = search_query  # Direct query text
+
         user_query_embedding = embedding_client.embed_query(text_to_embed)
+
 
         self.openai_embedding_latency = time.monotonic() - openai_start_time
         return user_query_embedding
 
     # ---------------------------------------------------------------------
+    # 🧩 CONVERSATION FILTER
     # 🧩 CONVERSATION FILTER
     # ---------------------------------------------------------------------
     def _create_conversation_filter(self, conversation_id: str):
@@ -194,28 +239,35 @@ class RetrievalService:
 
     # ---------------------------------------------------------------------
     # 🗃️ PROCESS QDRANT RESULTS
+    # 🗃️ PROCESS QDRANT RESULTS
     # ---------------------------------------------------------------------
     def _process_search_results(self, search_results, course_name):
         found_docs: list[Document] = []
+
 
         for d in search_results or []:
             try:
                 metadata = d.payload
                 page_content = metadata.get("page_content", "")
 
+
                 if not page_content.strip():
                     continue
 
+
                 metadata.pop("page_content", None)
 
+                # Normalize page number field
                 # Normalize page number field
                 if "pagenumber" not in metadata and "pagenumber_or_timestamp" in metadata:
                     metadata["pagenumber"] = metadata["pagenumber_or_timestamp"]
 
                 found_docs.append(Document(page_content=page_content, metadata=metadata))
 
+
             except Exception as e:
                 logging.error(f"⚠️ Error processing doc in {course_name}: {e}")
+
 
         return found_docs
 

@@ -1,6 +1,7 @@
 import warnings
 warnings.filterwarnings('ignore')
 import uuid
+import uuid
 import asyncio
 import os
 import time
@@ -16,6 +17,7 @@ from uuid import uuid4
 
 # --- Core Project Imports ---
 from database.blob import BlobStorage      # new blob storage
+from database.blob import BlobStorage      # new blob storage
 from database.sql import SQLDatabase
 from service.response_service import ResponseService
 from service.retrieval_service import RetrievalService
@@ -30,10 +32,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 # --------------------------------------------------------------------
 # 🚀 /INGEST
+# 🚀 /INGEST
 # --------------------------------------------------------------------
 @app.route('/ingest', methods=['POST'])
 def ingest() -> Response:
     """
+    Uploads one or multiple files to Azure Blob Storage and queues them for ingestion.
     Uploads one or multiple files to Azure Blob Storage and queues them for ingestion.
     """
     from tempfile import gettempdir
@@ -109,14 +113,18 @@ def ingest() -> Response:
 
     except Exception as e:
         logging.error(f"❌ Error in /ingest: {e}", exc_info=True)
+        logging.error(f"❌ Error in /ingest: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+# # --------------------------------------------------------------------
+# /CHAT  — FULL MULTILINGUAL RAG PIPELINE
 # # --------------------------------------------------------------------
 # /CHAT  — FULL MULTILINGUAL RAG PIPELINE
 # --------------------------------------------------------------------
 @app.route('/chat', methods=['POST'])
 def chat(retrieval_service: RetrievalService, response_service: ResponseService) -> Response:
     start_time = time.monotonic()
+
 
     try:
         data = request.get_json(force=True)
@@ -134,9 +142,39 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
 
         if not question :
             abort(400, description="Missing required parameters: 'question' ")
+        # Accept both "doc_groups" or "groups"
+        doc_groups = data.get('doc_groups') or data.get('groups') or []
+        if isinstance(doc_groups, str) and doc_groups.strip():
+            doc_groups = [doc_groups]
+        elif not isinstance(doc_groups, list):
+            doc_groups = []
+
+        if not question :
+            abort(400, description="Missing required parameters: 'question' ")
 
         logging.info(f"Chat request | Course: {course_name} | Groups: {doc_groups} | Question: {question[:80]}...")
+        logging.info(f"Chat request | Course: {course_name} | Groups: {doc_groups} | Question: {question[:80]}...")
 
+        # === Multilingual Step 1: Detect language of user query ===
+        original_lang = response_service.detect_language(question)
+        logging.info(f"Detected user language: {original_lang}")
+
+        # === Multilingual Step 2: Determine document language from doc_groups ===
+        # If no doc_groups provided, default to user language
+        if len(doc_groups) > 0:
+            target_doc_lang = doc_groups[0].lower()
+        else:
+            target_doc_lang = original_lang
+
+        logging.info(f"Document language for retrieval: {target_doc_lang}")
+
+        # === Multilingual Step 3: Translate the query BEFORE retrieval ===
+        translated_query = question
+        if original_lang != target_doc_lang:
+            logging.info(f"Translating query {original_lang} -> {target_doc_lang} before retrieval")
+            translated_query = response_service.translate(question, target_doc_lang)
+
+        # === Step 4: Retrieve contexts ===
         # === Multilingual Step 1: Detect language of user query ===
         original_lang = response_service.detect_language(question)
         logging.info(f"Detected user language: {original_lang}")
@@ -160,7 +198,9 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
         contexts = asyncio.run(
             retrieval_service.getTopContexts(
                 search_query=translated_query,
+                search_query=translated_query,
                 course_name=course_name,
+                doc_groups=doc_groups,
                 doc_groups=doc_groups,
                 top_n=5,
                 conversation_id=conversation_id
@@ -179,13 +219,16 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
             }), 200
 
         # === Step 5: Generate the final answer (ResponseService will translate back) ===
+        # === Step 5: Generate the final answer (ResponseService will translate back) ===
         result = response_service.generate_response(
+            question=question,  # original question
             question=question,  # original question
             contexts=contexts,
             course_name=course_name,
             conversation_history=conversation_history,
         )
 
+        # === Step 6: Store conversation ===
         # === Step 6: Store conversation ===
         from sqlalchemy import text
         convo_id = conversation_id or str(uuid4())
@@ -215,10 +258,12 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
                     },
                 )
 
+
         except Exception as e:
             logging.warning(f"Failed to store conversation: {e}")
 
         response = jsonify({
+            "final_response": result["answer"],
             "final_response": result["answer"],
             "contexts": contexts,
             "sources_used": result["sources_used"],
@@ -228,9 +273,12 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
         response.headers.add('Access-Control-Allow-Origin', '*')
         logging.info(f"Chat completed in {(time.monotonic() - start_time):.2f} sec")
 
+        logging.info(f"Chat completed in {(time.monotonic() - start_time):.2f} sec")
+
         return response
 
     except Exception as e:
+        logging.error(f"Error in /chat: {e}", exc_info=True)
         logging.error(f"Error in /chat: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
@@ -269,7 +317,42 @@ def getTopContexts(service: RetrievalService) -> Response:
     return response
 
 
+
 # --------------------------------------------------------------------
+# 🔍 /getTopContexts
+# --------------------------------------------------------------------
+@app.route('/getTopContexts', methods=['POST'])
+def getTopContexts(service: RetrievalService) -> Response:
+    """
+    Get most relevant contexts for a given search query.
+    """
+    start_time = time.monotonic()
+    data = request.get_json()
+    search_query: str = data.get('search_query', '')
+    course_name: str = data.get('course_name', '')
+    doc_groups: List[str] = data.get('doc_groups', [])
+    top_n: int = data.get('top_n', 100)
+    conversation_id: str = data.get('conversation_id', '')
+
+    if search_query == '' or course_name == '':
+        abort(
+            400,
+            description=(
+                f"Missing one or more required parameters: "
+                f"'search_query' and 'course_name' must be provided. "
+                f"Search query: `{search_query}`, Course name: `{course_name}`"
+            )
+        )
+
+    found_documents = asyncio.run(service.getTopContexts(search_query, course_name, doc_groups, top_n, conversation_id))
+    response = jsonify(found_documents)
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    print(f"⏰ Runtime of getTopContexts in main.py: {(time.monotonic() - start_time):.2f} seconds")
+    return response
+
+
+# --------------------------------------------------------------------
+# ⚙️ Dependency Injection Configuration
 # ⚙️ Dependency Injection Configuration
 # --------------------------------------------------------------------
 def configure(binder: Binder) -> None:
@@ -279,8 +362,10 @@ def configure(binder: Binder) -> None:
     binder.bind(BlobStorage, to=BlobStorage, scope=SingletonScope)
 
 
+
 FlaskInjector(app=app, modules=[configure])
 
 # --------------------------------------------------------------------
 if __name__ == '__main__':
+    app.run(debug=False, host='0.0.0.0', use_reloader=False, port=int(os.getenv("PORT", 5000)))
     app.run(debug=False, host='0.0.0.0', use_reloader=False, port=int(os.getenv("PORT", 5000)))

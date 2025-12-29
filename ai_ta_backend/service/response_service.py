@@ -71,6 +71,57 @@ class ResponseService:
     # ------------------------------------------------------------------
     # Main Response
     # ------------------------------------------------------------------
+        logging.info("ResponseService initialized")
+        logging.info(f"Endpoint: {os.getenv('AZURE_OPENAI_CHAT_ENDPOINT')}")
+        logging.info(f"Deployment: {self.chat_deployment}")
+
+
+    # ------------------------------------------------------------------
+    # Language Detection
+    # ------------------------------------------------------------------
+    def detect_language(self, text: str) -> str:
+        """Detect ISO language code: hi/mr/pa/en"""
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.chat_deployment,
+                messages=[
+                    {"role": "system", "content": "Detect the language of the text. Answer only ISO code: hi, mr, pa, en."},
+                    {"role": "user", "content": text}
+                ],
+                temperature=0
+            )
+            return resp.choices[0].message.content.strip().lower()
+        except Exception as e:
+            logging.error(f"Language detection failed: {e}")
+            return "en"
+
+
+    # ------------------------------------------------------------------
+    # Translation
+    # ------------------------------------------------------------------
+    def translate(self, text: str, target_lang: str) -> str:
+        """Translate text to target language"""
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.chat_deployment,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"Translate the following text into {target_lang}. Respond only with the translated text."
+                    },
+                    {"role": "user", "content": text}
+                ],
+                temperature=0
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            logging.error(f"Translation failed: {e}")
+            return text
+
+
+    # ------------------------------------------------------------------
+    # Main Response
+    # ------------------------------------------------------------------
     def generate_response(
         self,
         question: str,
@@ -78,6 +129,26 @@ class ResponseService:
         course_name: str,
         conversation_history: Optional[List[Dict]] = None
     ) -> Dict:
+
+        try:
+            # 1. Detect user query language
+            original_query_lang = self.detect_language(question)
+            logging.info(f"Query language detected: {original_query_lang}")
+
+            # 2. Determine document language from retrieved contexts
+            doc_lang = original_query_lang
+            if len(contexts) > 0:
+                first_group = contexts[0].get("doc_groups")
+                if isinstance(first_group, list) and len(first_group) > 0:
+                    doc_lang = first_group[0]
+                    logging.info(f"Document language detected: {doc_lang}")
+
+            # 3. Translate query to document language if needed
+            translated_question = question
+            if doc_lang != original_query_lang:
+                logging.info(f"Translating query {original_query_lang} -> {doc_lang}")
+                translated_question = self.translate(question, doc_lang)
+
 
         try:
             # 1. Detect user query language
@@ -118,6 +189,7 @@ class ResponseService:
 
             context_text = "\n\n".join(context_parts)
 
+
             system_prompt = self._build_system_prompt(course_name)
 
             messages = [{"role": "system", "content": system_prompt}]
@@ -127,11 +199,16 @@ class ResponseService:
 
             # Use translated question for RAG
             user_message = self._build_user_message(translated_question, context_text)
+            # Use translated question for RAG
+            user_message = self._build_user_message(translated_question, context_text)
             messages.append({"role": "user", "content": user_message})
 
             logging.info(f"Generating response for: {translated_question[:100]}...")
             logging.info(f"Using deployment: {self.chat_deployment}")
+            logging.info(f"Generating response for: {translated_question[:100]}...")
+            logging.info(f"Using deployment: {self.chat_deployment}")
 
+            # Generate
             # Generate
             response = self.client.chat.completions.create(
                 model=self.chat_deployment,
@@ -151,8 +228,19 @@ class ResponseService:
             if answer_lang != original_query_lang:
                 logging.info(f"Translating answer {answer_lang} -> {original_query_lang}")
                 final_answer = self.translate(answer, original_query_lang)
+            logging.info(f"Generated response ({len(answer)} chars)")
+
+            # 4. Detect answer language
+            answer_lang = self.detect_language(answer)
+
+            # 5. Translate answer back to original query language
+            final_answer = answer
+            if answer_lang != original_query_lang:
+                logging.info(f"Translating answer {answer_lang} -> {original_query_lang}")
+                final_answer = self.translate(answer, original_query_lang)
 
             result = {
+                "answer": final_answer,
                 "answer": final_answer,
                 "sources_used": len(contexts),
                 "model": self.chat_deployment,
@@ -167,10 +255,13 @@ class ResponseService:
 
         except Exception as e:
             logging.error(f"Error generating response: {e}")
+            logging.error(f"Error generating response: {e}")
             import traceback
             logging.error(traceback.format_exc())
             raise
 
+
+    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     def _build_system_prompt(self, course_name: str) -> str:
@@ -198,6 +289,7 @@ Student Question: {question}
 Please provide a helpful answer based on the context above. 
 Please answer in a short, precise 5–6 line maximum format, without sources or citations.
 If the context doesn't contain relevant information, let the student know."""
+
 
 
     def generate_streaming_response(
