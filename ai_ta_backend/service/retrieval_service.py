@@ -112,11 +112,16 @@ class RetrievalService:
         search_results = []
 
         try:
-            # Combine course filter + conversation filter
+            # For dedicated collections (biofarma, zenith), search only their own data
+            # For others, also include "Global" as fallback
+            DEDICATED_COURSES = {"biofarma", "zenith"}
+            
             if course_name and course_name.strip():
-                allowed_courses = [course_name, "Global"]
+                if course_name.lower() in DEDICATED_COURSES:
+                    allowed_courses = [course_name]  # no Global fallback
+                else:
+                    allowed_courses = [course_name, "Global"]
             else:
-                # User selected nothing -> only search global
                 allowed_courses = ["Global"]
 
             regular_filter = models.Filter(

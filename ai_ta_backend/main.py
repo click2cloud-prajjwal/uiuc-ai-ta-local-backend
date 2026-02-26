@@ -32,6 +32,17 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# --- Collection → Blob Container Mapping ---
+COLLECTION_CONTAINER_MAP = {
+    "biofarma-collection": "biofarma-rag-doc",
+    "zenith-collection":   "zenith-rag-doc",
+    # default fallback
+}
+DEFAULT_BLOB_CONTAINER = os.getenv("AZURE_BLOB_CONTAINER", "uiuc-chatbot")
+
+def get_blob_container_for_collection(collection_name: str) -> str:
+    return COLLECTION_CONTAINER_MAP.get(collection_name, DEFAULT_BLOB_CONTAINER)
+
 # --------------------------------------------------------------------
 # 🚀 /INGEST
 # --------------------------------------------------------------------
@@ -66,10 +77,12 @@ def ingest() -> Response:
             force_embeddings = request.form.get('force_embeddings', 'false').lower() == 'true'
             url = request.form.get('url')
             base_url = request.form.get('base_url')
+            collection_name = request.form.get('collection_name', '').strip()
+            blob_container = get_blob_container_for_collection(collection_name)
 
-            blob = BlobStorage()
-            blob_paths = []   # for ingestion
-            blob_urls = []    # for API response
+            blob = BlobStorage(container_name=blob_container)
+            blob_paths = []
+            blob_urls = []
 
             for uploaded_file in uploaded_files:
                 filename = uploaded_file.filename
@@ -79,10 +92,13 @@ def ingest() -> Response:
                 blob_key = f"uploads/{uuid.uuid4()}_{filename}"
                 blob.upload_file(temp_path, blob_key)
 
-                # ✅ store both
                 blob_paths.append(blob_key)
                 blob_urls.append(blob.get_blob_url(blob_key))
                 
+                # ✅ Use actual filename if readable_filename not provided
+                if not readable_filename:
+                    readable_filename = filename
+
                 # -------------------------------
                 # NEW: DOCUMENT METADATA INSERT
                 # -------------------------------
@@ -135,7 +151,7 @@ def ingest() -> Response:
 
             data = {
                 "course_name": course_name,
-                "blob_path": blob_paths,          # ✅ REQUIRED for ingestion worker
+                "blob_path": blob_paths,
                 "blob_urls": blob_urls,
                 "readable_filename": readable_filename,
                 "doc_groups": doc_groups,
@@ -143,6 +159,8 @@ def ingest() -> Response:
                 "force_embeddings": force_embeddings,
                 "url": url,
                 "base_url": base_url,
+                "collection_name": collection_name,
+                "blob_container": blob_container,
             }
 
             job_id = active_queue.addJobToIngestQueue(data)
@@ -162,6 +180,8 @@ def ingest() -> Response:
             base_url = data.get("base_url")
             doc_groups = data.get("doc_groups") or data.get("groups") or []
             force_embeddings = bool(data.get("force_embeddings", False))
+            collection_name = data.get("collection_name", "").strip()
+            blob_container = get_blob_container_for_collection(collection_name)
 
             if not url:
                 return jsonify({"error": "url is required"}), 400
@@ -175,7 +195,7 @@ def ingest() -> Response:
             html_content = response.text
 
             # 3?? Save HTML to Blob
-            blob = BlobStorage()
+            blob = BlobStorage(container_name=blob_container)
             blob_key = f"web/{uuid.uuid4()}_{readable_filename}"
             blob.upload_text(html_content, blob_key)
             blob_url = blob.get_blob_url(blob_key)
@@ -226,7 +246,7 @@ def ingest() -> Response:
             # 4?? Queue ingestion like a normal blob file
             payload = {
                 "course_name": course_name,
-                "blob_path": [blob_key],          # ? IMPORTANT
+                "blob_path": [blob_key],
                 "blob_urls": [blob_url],
                 "readable_filename": readable_filename,
                 "doc_groups": doc_groups,
@@ -234,6 +254,8 @@ def ingest() -> Response:
                 "force_embeddings": force_embeddings,
                 "url": url,
                 "base_url": base_url,
+                "collection_name": collection_name,
+                "blob_container": blob_container,
             }
 
             job_id = active_queue.addJobToIngestQueue(payload)
@@ -321,11 +343,14 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
             }), 200
 
         # === Step 5: Generate the final answer (ResponseService will translate back) ===
+        collection_name = data.get('collection_name', '').strip()
+
         result = response_service.generate_response(
-            question=question,  # original question
+            question=question,
             contexts=contexts,
             course_name=course_name,
             conversation_history=conversation_history,
+            collection_name=collection_name,
         )
 
         # === Step 6: Store conversation ===

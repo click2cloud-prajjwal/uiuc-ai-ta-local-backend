@@ -20,6 +20,12 @@ class ResponseService:
         self.temperature = float(os.getenv("CHAT_TEMPERATURE", "0.7"))
         self.max_tokens = int(os.getenv("CHAT_MAX_TOKENS", "1500"))
 
+        # Collection-specific token sizes
+        self.collection_max_tokens = {
+            "biofarma-collection": 2000,
+            "zenith-collection": 4000,
+        }
+
         logging.info("ResponseService initialized")
         logging.info(f"Endpoint: {os.getenv('AZURE_OPENAI_CHAT_ENDPOINT')}")
         logging.info(f"Deployment: {self.chat_deployment}")
@@ -76,10 +82,15 @@ class ResponseService:
         question: str,
         contexts: List[Dict],
         course_name: str,
-        conversation_history: Optional[List[Dict]] = None
+        conversation_history: Optional[List[Dict]] = None,
+        collection_name: str = "",
     ) -> Dict:
 
         try:
+            # Resolve max_tokens dynamically based on collection
+            max_tokens = self.collection_max_tokens.get(collection_name, self.max_tokens)
+            logging.info(f"🎯 collection_name='{collection_name}' → max_tokens={max_tokens}")
+
             # 1. Detect user query language
             original_query_lang = self.detect_language(question)
             logging.info(f"Query language detected: {original_query_lang}")
@@ -118,7 +129,7 @@ class ResponseService:
 
             context_text = "\n\n".join(context_parts)
 
-            system_prompt = self._build_system_prompt(course_name)
+            system_prompt = self._build_system_prompt(course_name, collection_name=collection_name)
 
             messages = [{"role": "system", "content": system_prompt}]
 
@@ -137,7 +148,7 @@ class ResponseService:
                 model=self.chat_deployment,
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=self.max_tokens
+                max_tokens=max_tokens
             )
 
             answer = response.choices[0].message.content
@@ -173,16 +184,44 @@ class ResponseService:
 
 
     # ------------------------------------------------------------------
-    def _build_system_prompt(self, course_name: str) -> str:
-        return f"""You are a helpful AI teaching assistant for the {course_name} course.
+    def _build_system_prompt(self, course_name: str, collection_name: str = "") -> str:
 
-Rules for every answer:
-- Keep responses short and precise.
-- Maximum 5–6 lines. May be shorter but never longer.
-- No long paragraphs, no long lists, no unnecessary detail.
-- No sources, no citations, no [Source] tags.
-- No newline spam. Keep formatting clean and simple.
-- If context is missing, say so briefly."""
+        if "biofarma" in collection_name.lower():
+            return f"""You are a helpful AI assistant for Biofarma.
+
+            You assist users with queries related to pharmaceutical products, financial data, customer records, and any uploaded documents.
+
+            Rules:
+            - Provide detailed, thorough responses of 7–8 lines maximum.
+            - Be informative but concise — cover all relevant points clearly.
+            - Handle sensitive financial or customer data with care — do not speculate beyond what the context provides.
+            - No sources or citation tags needed.
+            - If the context is insufficient, clearly state what information is missing.
+            - Format responses cleanly without excessive newlines."""
+
+        elif "zenith" in collection_name.lower():
+            return f"""You are a helpful AI assistant for Zenith Bank.
+
+            You assist employees and users with company policies, banking procedures, and internal guidelines.
+
+            Rules:
+            - If the user asks about a COMPANY POLICY, return the FULL and COMPLETE policy text without any trimming, summarizing, or omitting any part. Do not shorten policy content under any circumstances.
+            - For all other questions (non-policy), keep responses to 5–6 lines maximum.
+            - Never add sources, citations, or [Source] tags.
+            - Format responses clearly and professionally.
+            - If the context does not contain the requested policy, clearly inform the user."""
+
+        else:
+            # Default prompt
+            return f"""You are a helpful AI teaching assistant for the {course_name} course.
+
+            Rules for every answer:
+            - Keep responses short and precise.
+            - Maximum 5–6 lines. May be shorter but never longer.
+            - No long paragraphs, no long lists, no unnecessary detail.
+            - No sources, no citations, no [Source] tags.
+            - No newline spam. Keep formatting clean and simple.
+            - If context is missing, say so briefly."""
 
 
     # ------------------------------------------------------------------

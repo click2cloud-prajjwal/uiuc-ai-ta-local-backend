@@ -10,11 +10,11 @@ from azure.storage.blob import ContentSettings
 
 
 class BlobStorage:
-    def __init__(self):
+    def __init__(self, container_name: str = None):
         # Get environment variables
         self.account_name = os.getenv("AZURE_SA_NAME")
         self.account_key = os.getenv("AZURE_SA_ACCESSKEY")
-        self.container_name = os.getenv("AZURE_STORAGE_CONTAINER", "uiuc-chatbot")
+        self.container_name = container_name or os.getenv("AZURE_STORAGE_CONTAINER", "uiuc-chatbot")
 
         connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 

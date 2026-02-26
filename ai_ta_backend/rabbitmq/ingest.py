@@ -174,7 +174,7 @@ class Ingest:
         return "eng"
 
 
-    def initialize_resources(self):
+    def initialize_resources(self, blob_container: str = None):
         """Initialize Qdrant client and vectorstore with Azure OpenAI embeddings"""
         
         # Initialize Qdrant client and create collection if necessary
@@ -247,7 +247,9 @@ class Ingest:
             account_name = os.getenv("AZURE_SA_NAME")
             account_key = os.getenv("AZURE_SA_ACCESSKEY")
             connection_string = f"DefaultEndpointsProtocol=https;AccountName={account_name};AccountKey={account_key};EndpointSuffix=core.windows.net"
-            self.blob_container = os.getenv("AZURE_BLOB_CONTAINER", "uiuc-chatbot")
+            
+            # Use dynamic container if provided, else fall back to env
+            self.blob_container = blob_container or os.getenv("AZURE_BLOB_CONTAINER", "uiuc-chatbot")
 
             blob_service_client = BlobServiceClient.from_connection_string(connection_string)
             self.blob_client = blob_service_client.get_container_client(self.blob_container)
@@ -297,21 +299,25 @@ class Ingest:
 
 
     def main_ingest(self, job_id: str, **inputs: Dict[str | List[str], Any]):
-        """
-        Main ingest function.
-        """
         try:
-            self.initialize_resources()
+            # Extract collection and container BEFORE initialize_resources
+            # so blob_client is created pointing to the correct container
+            collection_name = inputs.get('collection_name', '').strip()
+            if collection_name:
+                self.qdrant_collection_name = collection_name
+                logging.info(f"🗂️ Using collection from request: {collection_name}")
+
+            blob_container = inputs.get('blob_container', '').strip() or None
+            self.initialize_resources(blob_container=blob_container)
+            logging.info(f"📦 Using blob container: {self.blob_container}")
 
             course_name: List[str] | str = inputs.get('course_name', '')
             blob_path: List[str] | str = inputs.get('blob_path', '')
             url: List[str] | str | None = inputs.get('url', None)
             base_url: List[str] | str | None = inputs.get('base_url', None)
             readable_filename: List[str] | str = inputs.get('readable_filename', '')
-            force_embeddings: bool = inputs.get('force_embeddings', False)  # if content is duplicated, still rescan
-
-            content: str | List[str] | None = inputs.get('content', None)  # defined if ingest type is webtext
-            # Normalize document groups to a consistent list format
+            force_embeddings: bool = inputs.get('force_embeddings', False)
+            content: str | List[str] | None = inputs.get('content', None)
             doc_groups = inputs.get('groups') or inputs.get('doc_groups')
 
             # Ensure doc_groups is always a list
@@ -324,17 +330,17 @@ class Ingest:
                 f"In top of /ingest route. course: {course_name}, blobpaths: {blob_path}, readable_filename: {readable_filename}, base_url: {base_url}, url: {url}, content: {content}, doc_groups: {doc_groups}"
             )
             success_fail_dict = self.run_ingest(course_name, blob_path, base_url, url, readable_filename, content,
-                                                doc_groups, force_embeddings)
+                                            doc_groups, force_embeddings, collection_name=self.qdrant_collection_name)
             for retry_num in range(1, 3):
-                if isinstance(success_fail_dict, str):  # TODO: What does this indicate?
+                if isinstance(success_fail_dict, str):
                     success_fail_dict = self.run_ingest(course_name, blob_path, base_url, url, readable_filename, content,
-                                                        doc_groups,force_embeddings)
-                    time.sleep(13 * retry_num)  # max is 65
+                                                        doc_groups, force_embeddings, collection_name=self.qdrant_collection_name)
+                    time.sleep(13 * retry_num)
                 elif success_fail_dict['failure_ingest']:
                     logging.error(f"Ingest failure -- Retry attempt {retry_num}. File: {success_fail_dict}")
                     success_fail_dict = self.run_ingest(course_name, blob_path, base_url, url, readable_filename, content,
-                                                        doc_groups,force_embeddings)
-                    time.sleep(13 * retry_num)  # max is 65
+                                                        doc_groups, force_embeddings, collection_name=self.qdrant_collection_name)
+                    time.sleep(13 * retry_num)
                 else:
                     break
             if success_fail_dict['failure_ingest']:
@@ -362,17 +368,19 @@ class Ingest:
             return json.dumps(success_fail_dict)
 
     def run_ingest(self, course_name, blob_path, base_url, url, readable_filename, content, document_groups,
-                   force_embeddings=False):
-        """Routes ingest jobs based on the input data -> webscrape, url, readable_filename"""
+               force_embeddings=False, collection_name=None):
         if content:
             return self.ingest_single_web_text(course_name, base_url, url, content, readable_filename,
-                                               groups=document_groups, force_embeddings=force_embeddings)
+                                            groups=document_groups, force_embeddings=force_embeddings,
+                                            collection_name=collection_name)
         elif readable_filename == '':
             return self.bulk_ingest(course_name, blob_path, base_url=base_url, url=url,
-                                    groups=document_groups, force_embeddings=force_embeddings)
+                                    groups=document_groups, force_embeddings=force_embeddings,
+                                    collection_name=collection_name)
         else:
             return self.bulk_ingest(course_name, blob_path, base_url=base_url, url=url,
-                                    groups=document_groups, readable_filename=readable_filename, force_embeddings=force_embeddings)
+                                    groups=document_groups, readable_filename=readable_filename,
+                                    force_embeddings=force_embeddings, collection_name=collection_name)
 
     def bulk_ingest(self, course_name: str, blob_path: Union[str, List[str]],
                 force_embeddings: bool, **kwargs) -> Dict[str, None | str | Dict[str, str]]:
@@ -719,6 +727,13 @@ class Ingest:
                     groups = [groups]
                 context.metadata['doc_groups'] = groups
 
+                # ✅ Add blob_url to every chunk metadata
+                blob_path = context.metadata.get('blob_path', '')
+                if blob_path and not context.metadata.get('blob_url'):
+                    account_name = os.getenv("AZURE_SA_NAME")
+                    container = self.blob_container
+                    context.metadata['blob_url'] = f"https://{account_name}.blob.core.windows.net/{container}/{blob_path}"
+
 
             # ============================================================
             # FIXED: Use Azure OpenAI embeddings directly (not OpenAIAPIProcessor)
@@ -756,9 +771,10 @@ class Ingest:
                 logging.error(traceback.format_exc())
                 raise
 
-            # Batched upload to Qdrant with temporary indexing threshold adjustments
-            collection_name = os.environ['QDRANT_COLLECTION_NAME']  # type: ignore
-            
+            # Batched upload to Qdrant — use dynamic collection name if passed, else fall back to instance default
+            collection_name = kwargs.get('collection_name') or self.qdrant_collection_name
+            logging.info(f"📦 Uploading to Qdrant collection: {collection_name}")
+
             # Raise indexing threshold to postpone indexing during bulk upserts
             try:
                 self.qdrant_client.update_collection(
@@ -940,17 +956,14 @@ class Ingest:
                     return True
                 else:
                     print(f"Updated file detected: {original_filename}")
-                    if force_embeddings:
-                        if incoming_blob_path:
-                            delete_status = self.delete_vectors(course_name, older_blob_path, '')
-                        else:
-                            delete_status = self.delete_vectors(course_name, '', url)
+                    # Always use delete_vectors (not delete_data) for updated files
+                    # delete_data would remove the blob file itself which we don't want
+                    # since the new file has already been uploaded to blob
+                    if incoming_blob_path:
+                        delete_status = self.delete_vectors(course_name, older_blob_path, '')
                     else:
-                        print("older blob_path/url to be deleted: ", sql_filename)
-                        if incoming_blob_path:
-                            delete_status = self.delete_data(course_name, older_blob_path, '')
-                        else:
-                            delete_status = self.delete_data(course_name, '', url)
+                        delete_status = self.delete_vectors(course_name, '', url)
+                    print(f"Cleared old vectors for updated file: {older_blob_path}")
                 return False
             else:
                 print(f"NOT a duplicate: {original_filename}")
