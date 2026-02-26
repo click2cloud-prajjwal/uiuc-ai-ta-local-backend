@@ -289,14 +289,15 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
         conversation_id: str = data.get('conversation_id', '')
         conversation_history: List[Dict] = data.get('conversation_history', [])
 
-        # Accept both "doc_groups" or "groups"
         doc_groups = data.get('doc_groups') or data.get('groups') or []
         if isinstance(doc_groups, str) and doc_groups.strip():
             doc_groups = [doc_groups]
         elif not isinstance(doc_groups, list):
             doc_groups = []
 
-        if not question :
+        collection_name = data.get('collection_name', '').strip()
+
+        if not question:
             abort(400, description="Missing required parameters: 'question' ")
 
         logging.info(f"Chat request | Course: {course_name} | Groups: {doc_groups} | Question: {question[:80]}...")
@@ -327,7 +328,8 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
                 course_name=course_name,
                 doc_groups=doc_groups,
                 top_n=5,
-                conversation_id=conversation_id
+                conversation_id=conversation_id,
+                collection_name=collection_name,
             )
         )
 

@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -72,12 +73,11 @@ class VectorDatabase:
     # ============================================================
 
     def vector_search(self, search_query, course_name, doc_groups: List[str], user_query_embedding, top_n,
-                      disabled_doc_groups: List[str], public_doc_groups: List[dict]):
-        """
-        Search in main Qdrant collection.
-        """
+                      disabled_doc_groups: List[str], public_doc_groups: List[dict],
+                      collection_name: str = None):
+        collection = collection_name or os.environ["QDRANT_COLLECTION_NAME"]
         search_results = self.qdrant_client.search(
-            collection_name=os.environ["QDRANT_COLLECTION_NAME"],
+            collection_name=collection,
             query_filter=self._create_search_filter(course_name, doc_groups, disabled_doc_groups, public_doc_groups),
             with_vectors=False,
             query_vector=user_query_embedding,
@@ -225,12 +225,12 @@ class VectorDatabase:
 
     def vector_search_with_filter(self, search_query, course_name, doc_groups: List[str],
                                   user_query_embedding, top_n, disabled_doc_groups: List[str],
-                                  public_doc_groups: List[dict], custom_filter: models.Filter):
-        """
-        Search vector database with a custom (conversation) filter.
-        """
+                                  public_doc_groups: List[dict], custom_filter: models.Filter,
+                                  collection_name: str = None):
+        collection = collection_name or os.environ["QDRANT_COLLECTION_NAME"]
+        logging.info(f"🔍 Searching in collection: {collection}")
         return self.qdrant_client.search(
-            collection_name=os.environ["QDRANT_COLLECTION_NAME"],
+            collection_name=collection,
             query_filter=custom_filter,
             with_vectors=False,
             query_vector=user_query_embedding,

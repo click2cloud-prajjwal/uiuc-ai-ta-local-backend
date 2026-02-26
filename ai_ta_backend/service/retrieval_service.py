@@ -54,6 +54,7 @@ class RetrievalService:
         doc_groups: List[str] | None = None,
         top_n: int = 5,
         conversation_id: str = "",
+        collection_name: str = "",
     ) -> Union[List[Dict], str]:
 
         if doc_groups is None:
@@ -76,6 +77,7 @@ class RetrievalService:
                 user_query_embedding=user_query_embedding,
                 top_n=top_n,
                 conversation_id=conversation_id,
+                collection_name=collection_name,
             )
 
             if not found_docs:
@@ -98,15 +100,8 @@ class RetrievalService:
     # ---------------------------------------------------------------------
     # ⚙️ VECTOR SEARCH WRAPPER
     # ---------------------------------------------------------------------
-    def vector_search(
-        self,
-        search_query: str,
-        course_name: str,
-        doc_groups: List[str],
-        user_query_embedding,
-        top_n: int = 5,
-        conversation_id: str = "",
-    ):
+    def vector_search(self, search_query, course_name, doc_groups, user_query_embedding,
+                      top_n, conversation_id, collection_name: str = ""):
 
         start_time = time.monotonic()
         search_results = []
@@ -133,31 +128,20 @@ class RetrievalService:
                 ]
             )
             if conversation_id:
-
                 convo_filter = self._create_conversation_filter(conversation_id)
                 combined_filter = models.Filter(should=[regular_filter, convo_filter])
-
                 search_results = self.vdb.vector_search_with_filter(
-                    search_query,
-                    course_name,
-                    doc_groups,
-                    user_query_embedding,
-                    top_n,
-                    [],
-                    [],
+                    search_query, course_name, doc_groups,
+                    user_query_embedding, top_n, [], [],
                     combined_filter,
+                    collection_name=collection_name,
                 )
-
             else:
                 search_results = self.vdb.vector_search_with_filter(
-                    search_query,
-                    course_name,
-                    doc_groups,
-                    user_query_embedding,
-                    top_n,
-                    [],
-                    [],
-                    regular_filter,   # USE THE SAME FILTER FROM ABOVE
+                    search_query, course_name, doc_groups,
+                    user_query_embedding, top_n, [], [],
+                    regular_filter,
+                    collection_name=collection_name,
                 )
 
 

@@ -137,7 +137,7 @@ class ResponseService:
                 messages.extend(conversation_history[-5:])
 
             # Use translated question for RAG
-            user_message = self._build_user_message(translated_question, context_text)
+            user_message = self._build_user_message(translated_question, context_text, collection_name=collection_name)
             messages.append({"role": "user", "content": user_message})
 
             logging.info(f"Generating response for: {translated_question[:100]}...")
@@ -197,7 +197,8 @@ class ResponseService:
             - Handle sensitive financial or customer data with care — do not speculate beyond what the context provides.
             - No sources or citation tags needed.
             - If the context is insufficient, clearly state what information is missing.
-            - Format responses cleanly without excessive newlines."""
+            - Format responses cleanly without excessive newlines.
+            - Do not answer the questions if user asks about celebrity,politics, religion, gibberish texts or any other non-banking topics."""
 
         elif "zenith" in collection_name.lower():
             return f"""You are a helpful AI assistant for Zenith Bank.
@@ -205,11 +206,12 @@ class ResponseService:
             You assist employees and users with company policies, banking procedures, and internal guidelines.
 
             Rules:
-            - If the user asks about a COMPANY POLICY, return the FULL and COMPLETE policy text without any trimming, summarizing, or omitting any part. Do not shorten policy content under any circumstances.
-            - For all other questions (non-policy), keep responses to 5–6 lines maximum.
+            - If the user asks about any POLICY, return the FULL and COMPLETE policy text without any trimming, summarizing, or omitting any part. Do not shorten policy content under any circumstances.
             - Never add sources, citations, or [Source] tags.
             - Format responses clearly and professionally.
-            - If the context does not contain the requested policy, clearly inform the user."""
+            - If the context does not contain the requested policy, clearly inform the user.
+            - Do not answer the questions if user asks about celebrity,politics, religion, gibberish texts or any other non-banking topics.
+            """
 
         else:
             # Default prompt
@@ -225,8 +227,36 @@ class ResponseService:
 
 
     # ------------------------------------------------------------------
-    def _build_user_message(self, question: str, context: str) -> str:
-        return f"""Context from course materials:
+    def _build_user_message(self, question: str, context: str, collection_name: str = "") -> str:
+
+        if "zenith" in collection_name.lower():
+            return f"""Context from company documents:
+
+{context}
+
+---
+
+Employee Question: {question}
+
+If this question is about a policy, return the COMPLETE and FULL policy text exactly as it appears in the context — do not summarize, trim, or shorten it in any way.
+For non-policy questions, provide a clear and professional answer.
+If the context doesn't contain the requested information, clearly inform the user."""
+
+        elif "biofarma" in collection_name.lower():
+            return f"""Context from Biofarma documents:
+
+{context}
+
+---
+
+User Question: {question}
+
+Please provide a detailed and helpful answer based on the context above in 7-8 lines.
+Do not speculate beyond what the context provides.
+If the context doesn't contain relevant information, let the user know."""
+
+        else:
+            return f"""Context from course materials:
 
 {context}
 
