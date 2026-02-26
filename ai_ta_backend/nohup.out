@@ -1,0 +1,23 @@
+None of PyTorch, TensorFlow >= 2.0, or Flax have been found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+/home/prajjwal/uiuc-ai-ta-local-backend/ai_ta_backend/database/vector.py:7: LangChainDeprecationWarning: Importing Qdrant from langchain.vectorstores is deprecated. Please replace deprecated imports:
+
+>> from langchain.vectorstores import Qdrant
+
+with new imports of:
+
+>> from langchain_community.vectorstores import Qdrant
+You can use the langchain cli to **automatically** upgrade many imports. Please see documentation here <https://python.langchain.com/docs/versions/v0_2/>
+  from langchain.vectorstores import Qdrant
+ * Serving Flask app 'main'
+ * Debug mode: off
+INFO:werkzeug:[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://10.0.0.4:5000
+INFO:werkzeug:[33mPress CTRL+C to quit[0m
+/home/prajjwal/uiuc-ai-ta-local-backend/ai_ta_backend/database/vector.py:59: LangChainDeprecationWarning: The class `Qdrant` was deprecated in LangChain 0.0.37 and will be removed in 1.0. An updated version of the class exists in the :class:`~langchain-qdrant package and should be used instead. To use it run `pip install -U :class:`~langchain-qdrant` and import as `from :class:`~langchain_qdrant import Qdrant``.
+  self.vectorstore = Qdrant(
+/home/prajjwal/uiuc-ai-ta-local-backend/ai_ta_backend/service/retrieval_service.py:39: LangChainDeprecationWarning: The class `AzureOpenAIEmbeddings` was deprecated in LangChain 0.0.9 and will be removed in 1.0. An updated version of the class exists in the :class:`~langchain-openai package and should be used instead. To use it run `pip install -U :class:`~langchain-openai` and import as `from :class:`~langchain_openai import AzureOpenAIEmbeddings``.
+  self.embeddings = AzureOpenAIEmbeddings(
+INFO:werkzeug:114.143.207.106 - - [19/Nov/2025 10:01:31] "POST /chat HTTP/1.1" 200 -
+INFO:werkzeug:114.143.207.106 - - [19/Nov/2025 10:02:57] "POST /chat HTTP/1.1" 200 -

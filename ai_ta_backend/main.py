@@ -1,0 +1,434 @@
+import warnings
+warnings.filterwarnings('ignore')
+import uuid
+import asyncio
+import os
+import time
+import logging
+from typing import Dict, List
+
+from dotenv import load_dotenv
+from flask import Flask, Response, abort, jsonify, request
+from flask_cors import CORS
+from flask_injector import FlaskInjector, RequestScope
+from injector import Binder, SingletonScope
+from uuid import uuid4
+from pathlib import Path
+from urllib.parse import urlparse
+import requests
+
+# --- Core Project Imports ---
+from database.blob import BlobStorage      # new blob storage
+from database.sql import SQLDatabase
+from service.response_service import ResponseService
+from service.retrieval_service import RetrievalService
+from service.document_summary_service import DocumentSummaryService
+from rabbitmq.rmqueue import Queue
+
+# --- App Initialization ---
+app = Flask(__name__)
+CORS(app)
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# --------------------------------------------------------------------
+# 🚀 /INGEST
+# --------------------------------------------------------------------
+@app.route('/ingest', methods=['POST'])
+def ingest() -> Response:
+    """
+    Uploads one or multiple files to Azure Blob Storage and queues them for ingestion.
+    """
+    from tempfile import gettempdir
+    from sqlalchemy import text
+    from database.sql import SQLDatabase
+
+    active_queue = Queue()
+    sql_db = SQLDatabase()
+
+
+    try:
+        if request.content_type.startswith('multipart/form-data'):
+            course_name = request.form.get('course_name')
+            readable_filename = request.form.get('readable_filename')
+
+            uploaded_files = request.files.getlist('file')
+            if not uploaded_files:
+                return jsonify({"error": "No files uploaded"}), 400
+
+            raw_groups = request.form.getlist('doc_groups') or request.form.getlist('groups')
+            if len(raw_groups) == 1 and ',' in raw_groups[0]:
+                doc_groups = [g.strip() for g in raw_groups[0].split(',') if g.strip()]
+            else:
+                doc_groups = raw_groups
+
+            force_embeddings = request.form.get('force_embeddings', 'false').lower() == 'true'
+            url = request.form.get('url')
+            base_url = request.form.get('base_url')
+
+            blob = BlobStorage()
+            blob_paths = []   # for ingestion
+            blob_urls = []    # for API response
+
+            for uploaded_file in uploaded_files:
+                filename = uploaded_file.filename
+                temp_path = os.path.join(gettempdir(), filename)
+                uploaded_file.save(temp_path)
+
+                blob_key = f"uploads/{uuid.uuid4()}_{filename}"
+                blob.upload_file(temp_path, blob_key)
+
+                # ✅ store both
+                blob_paths.append(blob_key)
+                blob_urls.append(blob.get_blob_url(blob_key))
+                
+                # -------------------------------
+                # NEW: DOCUMENT METADATA INSERT
+                # -------------------------------
+                document_name = filename
+                document_type = filename.split('.')[-1].lower() if '.' in filename else 'unknown'
+                
+                with sql_db.engine.begin() as conn:
+                    conn.execute(
+                        text("""
+                            INSERT INTO documents (
+                                blob_path,
+                                document_name,
+                                document_type,
+                                doc_groups,
+                                course_name,
+                                url,
+                                base_url,
+                                created_at
+                            ) VALUES (
+                                :blob_path,
+                                :document_name,
+                                :document_type,
+                                :doc_groups,
+                                :course_name,
+                                :url,
+                                :base_url,
+                                NOW()
+                            )
+                            ON CONFLICT (blob_path) DO UPDATE SET
+                                document_name = EXCLUDED.document_name,
+                                document_type = EXCLUDED.document_type,
+                                doc_groups = EXCLUDED.doc_groups
+                            RETURNING id
+                        """),
+                        {
+                            "blob_path": blob_key,
+                            "document_name": document_name,
+                            "document_type": document_type,
+                            "doc_groups": doc_groups,
+                            "course_name": course_name,
+                            "url": url,
+                            "base_url": base_url,
+                        }
+                    )
+                    logging.info(f"? Document inserted/updated: {blob_key}")
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+            data = {
+                "course_name": course_name,
+                "blob_path": blob_paths,          # ✅ REQUIRED for ingestion worker
+                "blob_urls": blob_urls,
+                "readable_filename": readable_filename,
+                "doc_groups": doc_groups,
+                "language": doc_groups,
+                "force_embeddings": force_embeddings,
+                "url": url,
+                "base_url": base_url,
+            }
+
+            job_id = active_queue.addJobToIngestQueue(data)
+
+            return jsonify({
+                "outcome": f"Queued {len(blob_paths)} files for ingestion",
+                "task_id": job_id,
+                "blob_urls": blob_urls             # ✅ returned to client
+            }), 200
+
+        elif request.content_type.startswith('application/json'):
+
+            data = request.get_json(force=True)
+
+            course_name = data.get("course_name")
+            url = data.get("url")
+            base_url = data.get("base_url")
+            doc_groups = data.get("doc_groups") or data.get("groups") or []
+            force_embeddings = bool(data.get("force_embeddings", False))
+
+            if not url:
+                return jsonify({"error": "url is required"}), 400
+
+            # 1?? Auto readable filename from URL
+            readable_filename = Path(urlparse(url).path).name or "web_document.html"
+
+            # 2?? Fetch URL content
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            html_content = response.text
+
+            # 3?? Save HTML to Blob
+            blob = BlobStorage()
+            blob_key = f"web/{uuid.uuid4()}_{readable_filename}"
+            blob.upload_text(html_content, blob_key)
+            blob_url = blob.get_blob_url(blob_key)
+            
+            # -------------------------------
+            # NEW: DOCUMENT METADATA INSERT
+            # -------------------------------
+            with sql_db.engine.begin() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO documents (
+                            blob_path,
+                            document_name,
+                            document_type,
+                            doc_groups,
+                            course_name,
+                            url,
+                            base_url,
+                            created_at
+                        ) VALUES (
+                            :blob_path,
+                            :document_name,
+                            :document_type,
+                            :doc_groups,
+                            :course_name,
+                            :url,
+                            :base_url,
+                            NOW()
+                        )
+                        ON CONFLICT (blob_path) DO UPDATE SET
+                            document_name = EXCLUDED.document_name,
+                            document_type = EXCLUDED.document_type,
+                            doc_groups = EXCLUDED.doc_groups
+                        RETURNING id
+                    """),
+                    {
+                        "blob_path": blob_key,
+                        "document_name": readable_filename,
+                        "document_type": "url",
+                        "doc_groups": doc_groups,
+                        "course_name": course_name,
+                        "url": url,
+                        "base_url": base_url,
+                    }
+                )
+                logging.info(f"? Document inserted/updated: {blob_key}")
+
+            # 4?? Queue ingestion like a normal blob file
+            payload = {
+                "course_name": course_name,
+                "blob_path": [blob_key],          # ? IMPORTANT
+                "blob_urls": [blob_url],
+                "readable_filename": readable_filename,
+                "doc_groups": doc_groups,
+                "groups": doc_groups,
+                "force_embeddings": force_embeddings,
+                "url": url,
+                "base_url": base_url,
+            }
+
+            job_id = active_queue.addJobToIngestQueue(payload)
+
+            return jsonify({
+                "outcome": "Queued URL ingest task",
+                "task_id": job_id,
+                "blob_path": blob_key,
+                "blob_url": blob_url
+            }), 200
+        
+        else:
+            return jsonify({"error": "Unsupported content type"}), 415
+
+    except Exception as e:
+        logging.error(f"❌ Error in /ingest: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+# # --------------------------------------------------------------------
+# /CHAT  — FULL MULTILINGUAL RAG PIPELINE
+# --------------------------------------------------------------------
+@app.route('/chat', methods=['POST'])
+def chat(retrieval_service: RetrievalService, response_service: ResponseService) -> Response:
+    start_time = time.monotonic()
+
+    try:
+        data = request.get_json(force=True)
+        question: str = data.get('question', '').strip()
+        course_name: str = data.get('course_name', '').strip()
+        conversation_id: str = data.get('conversation_id', '')
+        conversation_history: List[Dict] = data.get('conversation_history', [])
+
+        # Accept both "doc_groups" or "groups"
+        doc_groups = data.get('doc_groups') or data.get('groups') or []
+        if isinstance(doc_groups, str) and doc_groups.strip():
+            doc_groups = [doc_groups]
+        elif not isinstance(doc_groups, list):
+            doc_groups = []
+
+        if not question :
+            abort(400, description="Missing required parameters: 'question' ")
+
+        logging.info(f"Chat request | Course: {course_name} | Groups: {doc_groups} | Question: {question[:80]}...")
+
+        # === Multilingual Step 1: Detect language of user query ===
+        original_lang = response_service.detect_language(question)
+        logging.info(f"Detected user language: {original_lang}")
+
+        # === Multilingual Step 2: Determine document language from doc_groups ===
+        # If no doc_groups provided, default to user language
+        if len(doc_groups) > 0:
+            target_doc_lang = doc_groups[0].lower()
+        else:
+            target_doc_lang = original_lang
+
+        logging.info(f"Document language for retrieval: {target_doc_lang}")
+
+        # === Multilingual Step 3: Translate the query BEFORE retrieval ===
+        translated_query = question
+        if original_lang != target_doc_lang:
+            logging.info(f"Translating query {original_lang} -> {target_doc_lang} before retrieval")
+            translated_query = response_service.translate(question, target_doc_lang)
+
+        # === Step 4: Retrieve contexts ===
+        contexts = asyncio.run(
+            retrieval_service.getTopContexts(
+                search_query=translated_query,
+                course_name=course_name,
+                doc_groups=doc_groups,
+                top_n=5,
+                conversation_id=conversation_id
+            )
+        )
+
+        if not contexts:
+            return jsonify({
+                "answer": (
+                    "I don't have enough information in the course materials "
+                    "to answer this question. Try rephrasing or asking about covered topics."
+                ),
+                "contexts": [],
+                "sources_used": 0,
+                "model": None
+            }), 200
+
+        # === Step 5: Generate the final answer (ResponseService will translate back) ===
+        result = response_service.generate_response(
+            question=question,  # original question
+            contexts=contexts,
+            course_name=course_name,
+            conversation_history=conversation_history,
+        )
+
+        # === Step 6: Store conversation ===
+        from sqlalchemy import text
+        convo_id = conversation_id or str(uuid4())
+        model_used = result["model"]
+
+        try:
+            with retrieval_service.sqlDb.engine.begin() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO conversations (id, name, model, project_name, created_at, updated_at)
+                        VALUES (:id, :name, :model, :project_name, NOW(), NOW())
+                        ON CONFLICT (id) DO NOTHING;
+                    """),
+                    {"id": convo_id, "name": course_name, "model": model_used, "project_name": course_name},
+                )
+
+                conn.execute(
+                    text("""
+                        INSERT INTO messages (conversation_id, role, content_text, created_at, updated_at, response_time_sec)
+                        VALUES (:conversation_id, :role, :content_text, NOW(), NOW(), :response_time_sec);
+                    """),
+                    {
+                        "conversation_id": convo_id,
+                        "role": "assistant",
+                        "content_text": result["answer"],
+                        "response_time_sec": time.monotonic() - start_time,
+                    },
+                )
+
+        except Exception as e:
+            logging.warning(f"Failed to store conversation: {e}")
+
+        response = jsonify({
+            "final_response": result["answer"],
+            "contexts": contexts,
+            "sources_used": result["sources_used"],
+            "model": result["model"],
+            "usage": result.get("usage", {})
+        })
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        logging.info(f"Chat completed in {(time.monotonic() - start_time):.2f} sec")
+
+        return response
+
+    except Exception as e:
+        logging.error(f"Error in /chat: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+
+@app.route("/documents/summary", methods=["GET"])
+def get_documents_summary(summary_service : DocumentSummaryService):
+    data = summary_service.get_summary()
+    return jsonify(data), 200
+
+# --------------------------------------------------------------------
+# 🔍 /getTopContexts
+# --------------------------------------------------------------------
+@app.route('/getTopContexts', methods=['POST'])
+def getTopContexts(service: RetrievalService) -> Response:
+    """
+    Get most relevant contexts for a given search query.
+    """
+    start_time = time.monotonic()
+    data = request.get_json()
+    search_query: str = data.get('search_query', '')
+    course_name: str = data.get('course_name', '')
+    doc_groups: List[str] = data.get('doc_groups', [])
+    top_n: int = data.get('top_n', 100)
+    conversation_id: str = data.get('conversation_id', '')
+
+    if search_query == '' or course_name == '':
+        abort(
+            400,
+            description=(
+                f"Missing one or more required parameters: "
+                f"'search_query' and 'course_name' must be provided. "
+                f"Search query: `{search_query}`, Course name: `{course_name}`"
+            )
+        )
+
+    found_documents = asyncio.run(service.getTopContexts(search_query, course_name, doc_groups, top_n, conversation_id))
+    response = jsonify(found_documents)
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    print(f"⏰ Runtime of getTopContexts in main.py: {(time.monotonic() - start_time):.2f} seconds")
+    return response
+
+
+# --------------------------------------------------------------------
+# ⚙️ Dependency Injection Configuration
+# --------------------------------------------------------------------
+def configure(binder: Binder) -> None:
+    binder.bind(RetrievalService, to=RetrievalService, scope=RequestScope)
+    binder.bind(ResponseService, to=ResponseService, scope=RequestScope)
+    binder.bind(SQLDatabase, to=SQLDatabase, scope=SingletonScope)
+    binder.bind(BlobStorage, to=BlobStorage, scope=SingletonScope)
+    binder.bind(DocumentSummaryService, to=DocumentSummaryService, scope=SingletonScope)
+
+
+FlaskInjector(app=app, modules=[configure])
+
+# --------------------------------------------------------------------
+if __name__ == '__main__':
+    app.run(debug=False, host='0.0.0.0', use_reloader=False, port=int(os.getenv("PORT", 5000)))

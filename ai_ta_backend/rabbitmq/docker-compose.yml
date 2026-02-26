@@ -1,0 +1,44 @@
+
+services:
+  # Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: uiuc-worker
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      # RabbitMQ - Hardcoded Docker service name
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      
+      # PostgreSQL - Hardcoded Docker service name
+      POSTGRES_ENDPOINT: postgres
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USERNAME: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DATABASE: uiuc_db
+      
+      # Qdrant - Hardcoded Docker service name
+      QDRANT_URL: http://20.3.237.15:6333
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      QDRANT_COLLECTION_NAME: chatbot-embeddings
+    env_file:
+      - .env  # For Azure keys and other shared configs
+    networks:
+      - uiuc-network
+
+volumes:
+  postgres_data:
+  qdrant_data:
+
+networks:
+  uiuc-network:
+    external: true
