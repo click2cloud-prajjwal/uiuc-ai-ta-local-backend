@@ -3,6 +3,7 @@ import logging
 from typing import List, Dict, Optional
 from openai import AzureOpenAI
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 
@@ -17,7 +18,7 @@ class ResponseService:
         )
 
         self.chat_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1-mini")
-        self.temperature = float(os.getenv("CHAT_TEMPERATURE", "0.7"))
+        self.temperature = float(os.getenv("CHAT_TEMPERATURE", "0.1"))
         self.max_tokens = int(os.getenv("CHAT_MAX_TOKENS", "1500"))
 
         # Collection-specific token sizes
@@ -29,50 +30,6 @@ class ResponseService:
         logging.info("ResponseService initialized")
         logging.info(f"Endpoint: {os.getenv('AZURE_OPENAI_CHAT_ENDPOINT')}")
         logging.info(f"Deployment: {self.chat_deployment}")
-
-
-    # ------------------------------------------------------------------
-    # Language Detection
-    # ------------------------------------------------------------------
-    def detect_language(self, text: str) -> str:
-        """Detect ISO language code: hi/mr/pa/en"""
-        try:
-            resp = self.client.chat.completions.create(
-                model=self.chat_deployment,
-                messages=[
-                    {"role": "system", "content": "Detect the language of the text. Answer only ISO code: hi, mr, pa, en."},
-                    {"role": "user", "content": text}
-                ],
-                temperature=0
-            )
-            return resp.choices[0].message.content.strip().lower()
-        except Exception as e:
-            logging.error(f"Language detection failed: {e}")
-            return "en"
-
-
-    # ------------------------------------------------------------------
-    # Translation
-    # ------------------------------------------------------------------
-    def translate(self, text: str, target_lang: str) -> str:
-        """Translate text to target language"""
-        try:
-            resp = self.client.chat.completions.create(
-                model=self.chat_deployment,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": f"Translate the following text into {target_lang}. Respond only with the translated text."
-                    },
-                    {"role": "user", "content": text}
-                ],
-                temperature=0
-            )
-            return resp.choices[0].message.content.strip()
-        except Exception as e:
-            logging.error(f"Translation failed: {e}")
-            return text
-
 
     # ------------------------------------------------------------------
     # Main Response
@@ -91,23 +48,7 @@ class ResponseService:
             max_tokens = self.collection_max_tokens.get(collection_name, self.max_tokens)
             logging.info(f"🎯 collection_name='{collection_name}' → max_tokens={max_tokens}")
 
-            # 1. Detect user query language
-            original_query_lang = self.detect_language(question)
-            logging.info(f"Query language detected: {original_query_lang}")
-
-            # 2. Determine document language from retrieved contexts
-            doc_lang = original_query_lang
-            if len(contexts) > 0:
-                first_group = contexts[0].get("doc_groups")
-                if isinstance(first_group, list) and len(first_group) > 0:
-                    doc_lang = first_group[0]
-                    logging.info(f"Document language detected: {doc_lang}")
-
-            # 3. Translate query to document language if needed
             translated_question = question
-            if doc_lang != original_query_lang:
-                logging.info(f"Translating query {original_query_lang} -> {doc_lang}")
-                translated_question = self.translate(question, doc_lang)
 
             # Build context string from retrieved chunks
             context_parts = []
@@ -137,31 +78,31 @@ class ResponseService:
                 messages.extend(conversation_history[-5:])
 
             # Use translated question for RAG
-            user_message = self._build_user_message(translated_question, context_text, collection_name=collection_name)
+            user_message = self._build_user_message(
+                    question,  # always use original question
+                    context_text,
+                    collection_name=collection_name
+                )
             messages.append({"role": "user", "content": user_message})
 
-            logging.info(f"Generating response for: {translated_question[:100]}...")
+            logging.info(f"Generating response for: {question[:100]}...")
             logging.info(f"Using deployment: {self.chat_deployment}")
 
             # Generate
+            t_llm = time.monotonic()
             response = self.client.chat.completions.create(
                 model=self.chat_deployment,
                 messages=messages,
                 temperature=self.temperature,
                 max_tokens=max_tokens
             )
+            print(f"⏱️ LLM API call took: {time.monotonic() - t_llm:.2f}s", flush=True)
+            print(f"⏱️ Prompt tokens: {response.usage.prompt_tokens}, Completion tokens: {response.usage.completion_tokens}", flush=True)
 
             answer = response.choices[0].message.content
             logging.info(f"Generated response ({len(answer)} chars)")
 
-            # 4. Detect answer language
-            answer_lang = self.detect_language(answer)
-
-            # 5. Translate answer back to original query language
             final_answer = answer
-            if answer_lang != original_query_lang:
-                logging.info(f"Translating answer {answer_lang} -> {original_query_lang}")
-                final_answer = self.translate(answer, original_query_lang)
 
             result = {
                 "answer": final_answer,
@@ -198,6 +139,7 @@ class ResponseService:
             - No sources or citation tags needed.
             - If the context is insufficient, clearly state what information is missing.
             - Format responses cleanly without excessive newlines.
+            - Always respond in the SAME language as the user's question.
             - Do not answer the questions if user asks about celebrity,politics, religion, gibberish texts or any other non-banking topics."""
 
         elif "zenith" in collection_name.lower():
@@ -210,6 +152,8 @@ class ResponseService:
             - Never add sources, citations, or [Source] tags.
             - Format responses clearly and professionally.
             - If the context does not contain the requested policy, clearly inform the user.
+            - Always respond in the SAME language as the user's question.
+            - Whenever the user asks for a holiday calendar, always format the response as a clean, aligned tabular structure (columns with headers and rows), never as multiline or vertically stacked text.
             - Do not answer the questions if user asks about celebrity,politics, religion, gibberish texts or any other non-banking topics.
             """
 
@@ -223,6 +167,7 @@ class ResponseService:
             - No long paragraphs, no long lists, no unnecessary detail.
             - No sources, no citations, no [Source] tags.
             - No newline spam. Keep formatting clean and simple.
+            - Always respond in the SAME language as the user's question.
             - If context is missing, say so briefly."""
 
 
@@ -238,9 +183,11 @@ class ResponseService:
 
 Employee Question: {question}
 
-If this question is about a policy, return the COMPLETE and FULL policy text exactly as it appears in the context — do not summarize, trim, or shorten it in any way.
-For non-policy questions, provide a clear and professional answer.
-If the context doesn't contain the requested information, clearly inform the user."""
+Instructions:
+- If the user explicitly asks to "show", "give", "return", "list" or "what is the full/complete [policy name]", return the FULL policy text as-is from the context.
+- For all other questions, answer concisely in 9-10 lines maximum. Extract only the relevant part.
+- Never fabricate information not present in the context.
+- If the context doesn't contain the requested information, clearly inform the user."""
 
         elif "biofarma" in collection_name.lower():
             return f"""Context from Biofarma documents:
@@ -282,7 +229,7 @@ If the context doesn't contain relevant information, let the student know."""
         try:
             # Build context
             context_parts = []
-            for i, ctx in enumerate(contexts[:5], 1):
+            for i, ctx in enumerate(contexts[:3], 1):
                 text = ctx.get('text', ctx.get('page_content', ''))
                 source = ctx.get('readable_filename', 'Unknown')
                 context_parts.append(f"[Source {i} - {source}]:\n{text}")

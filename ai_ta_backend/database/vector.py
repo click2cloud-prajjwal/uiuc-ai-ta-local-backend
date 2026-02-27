@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from injector import inject
 from langchain_openai import AzureOpenAIEmbeddings
-from langchain.vectorstores import Qdrant
+from langchain_qdrant import Qdrant
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.models import FieldCondition, MatchAny, MatchValue
 

@@ -302,36 +302,20 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
 
         logging.info(f"Chat request | Course: {course_name} | Groups: {doc_groups} | Question: {question[:80]}...")
 
-        # === Multilingual Step 1: Detect language of user query ===
-        original_lang = response_service.detect_language(question)
-        logging.info(f"Detected user language: {original_lang}")
+        search_query = question
 
-        # === Multilingual Step 2: Determine document language from doc_groups ===
-        # If no doc_groups provided, default to user language
-        if len(doc_groups) > 0:
-            target_doc_lang = doc_groups[0].lower()
-        else:
-            target_doc_lang = original_lang
-
-        logging.info(f"Document language for retrieval: {target_doc_lang}")
-
-        # === Multilingual Step 3: Translate the query BEFORE retrieval ===
-        translated_query = question
-        if original_lang != target_doc_lang:
-            logging.info(f"Translating query {original_lang} -> {target_doc_lang} before retrieval")
-            translated_query = response_service.translate(question, target_doc_lang)
-
-        # === Step 4: Retrieve contexts ===
+        t0 = time.monotonic()
         contexts = asyncio.run(
             retrieval_service.getTopContexts(
-                search_query=translated_query,
+                search_query=search_query,
                 course_name=course_name,
                 doc_groups=doc_groups,
-                top_n=5,
+                top_n=3,
                 conversation_id=conversation_id,
                 collection_name=collection_name,
             )
         )
+        logging.info(f"Retrieved contexts in {(time.monotonic() - t0):.2f} seconds | Found {len(contexts)} contexts")
 
         if not contexts:
             return jsonify({
@@ -346,7 +330,7 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
 
         # === Step 5: Generate the final answer (ResponseService will translate back) ===
         collection_name = data.get('collection_name', '').strip()
-
+        t3 = time.monotonic()
         result = response_service.generate_response(
             question=question,
             contexts=contexts,
@@ -354,6 +338,7 @@ def chat(retrieval_service: RetrievalService, response_service: ResponseService)
             conversation_history=conversation_history,
             collection_name=collection_name,
         )
+        logging.info(f"Generated response in {(time.monotonic() - t3):.2f} seconds")
 
         # === Step 6: Store conversation ===
         from sqlalchemy import text
@@ -447,8 +432,8 @@ def getTopContexts(service: RetrievalService) -> Response:
 # ⚙️ Dependency Injection Configuration
 # --------------------------------------------------------------------
 def configure(binder: Binder) -> None:
-    binder.bind(RetrievalService, to=RetrievalService, scope=RequestScope)
-    binder.bind(ResponseService, to=ResponseService, scope=RequestScope)
+    binder.bind(RetrievalService, to=RetrievalService, scope=SingletonScope)
+    binder.bind(ResponseService, to=ResponseService, scope=SingletonScope)
     binder.bind(SQLDatabase, to=SQLDatabase, scope=SingletonScope)
     binder.bind(BlobStorage, to=BlobStorage, scope=SingletonScope)
     binder.bind(DocumentSummaryService, to=DocumentSummaryService, scope=SingletonScope)

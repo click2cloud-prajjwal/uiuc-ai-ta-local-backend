@@ -7,7 +7,7 @@ from typing import Dict, List, Union
 from injector import inject
 
 from langchain.schema import Document
-from langchain_community.embeddings import AzureOpenAIEmbeddings
+from langchain_openai import AzureOpenAIEmbeddings
 from qdrant_client.http import models
 
 from database.blob import BlobStorage
@@ -64,12 +64,13 @@ class RetrievalService:
             start_time = time.monotonic()
             logging.info(f"🔍 Retrieving contexts for course: {course_name}")
 
-            # Compute query embedding (CLEAN)
+            t1 = time.monotonic()
             user_query_embedding = self._embed_query_and_measure_latency(
                 search_query, self.embeddings
             )
+            print(f"⏱️ Embedding took: {time.monotonic() - t1:.2f}s", flush=True)
 
-            # Vector search
+            t2 = time.monotonic()
             found_docs = self.vector_search(
                 search_query=search_query,
                 course_name=course_name,
@@ -79,6 +80,7 @@ class RetrievalService:
                 conversation_id=conversation_id,
                 collection_name=collection_name,
             )
+            print(f"⏱️ Vector search took: {time.monotonic() - t2:.2f}s", flush=True)
 
             if not found_docs:
                 logging.warning(f"⚠️ No contexts found for {course_name}")
